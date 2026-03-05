@@ -76,11 +76,17 @@ public sealed class CodexAgentRunnerTests
 
         var workspace = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-runner"));
         var scriptPath = Path.Combine(workspace.FullName, "fake-app-server.ps1");
+        var wrapperPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-fake-app-server-wrapper.cmd");
         await File.WriteAllTextAsync(scriptPath, FakeAppServerScript());
+        await File.WriteAllTextAsync(
+            wrapperPath,
+            """
+            @echo off
+            powershell -NoProfile -ExecutionPolicy Bypass -File "%~1"
+            """);
 
         var runner = new CodexAgentRunner(NullLogger<CodexAgentRunner>.Instance);
-        var escapedScriptPath = scriptPath.Replace("'", "''", StringComparison.Ordinal);
-        var command = $"powershell -NoProfile -ExecutionPolicy Bypass -File '{escapedScriptPath}'";
+        var command = $"call \"{wrapperPath}\" \"{scriptPath}\"";
 
         var result = await runner.RunIssueAsync(CreateRequest("id-4", "#4", workspace.FullName, command, 30_000));
 
@@ -123,7 +129,7 @@ public sealed class CodexAgentRunnerTests
     private static string SleepCommand()
     {
         return RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? "powershell -NoProfile -Command \"Start-Sleep -Seconds 5\""
+            ? "ping 127.0.0.1 -n 6 > nul"
             : "sleep 5";
     }
 

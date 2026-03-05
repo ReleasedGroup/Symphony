@@ -67,8 +67,24 @@ public sealed class OrchestrationTickService(
             query.Owner,
             query.Repo);
 
-        foreach (var issue in issues)
+        var maxConcurrentAgents = workflowDefinition.Runtime.Agent.MaxConcurrentAgents;
+        var orderedIssues = OrderIssuesForDispatch(issues).ToList();
+        if (orderedIssues.Count > maxConcurrentAgents)
         {
+            logger.LogInformation(
+                "Found {CandidateCount} ordered candidates; at most {MaxConcurrentAgents} agents can be dispatched this tick.",
+                orderedIssues.Count,
+                maxConcurrentAgents);
+        }
+
+        var dispatchCount = 0;
+        foreach (var issue in orderedIssues)
+        {
+            if (dispatchCount >= maxConcurrentAgents)
+            {
+                break;
+            }
+
             var claimed = await coordinationStore.TryClaimIssueAsync(
                 issue.Id,
                 issue.Identifier,
@@ -80,6 +96,8 @@ public sealed class OrchestrationTickService(
                 logger.LogDebug("Issue {IssueIdentifier} already claimed by another instance.", issue.Identifier);
                 continue;
             }
+
+            dispatchCount++;
 
             var releaseStatus = "agent_failed";
             try
@@ -225,5 +243,15 @@ public sealed class OrchestrationTickService(
         }
 
         return $"{value[..maxLength]}...";
+    }
+
+    private static IEnumerable<NormalizedIssue> OrderIssuesForDispatch(IEnumerable<NormalizedIssue> issues)
+    {
+        return issues
+            .OrderBy(issue => issue.Priority.HasValue ? 0 : 1)
+            .ThenBy(issue => issue.Priority ?? int.MaxValue)
+            .ThenBy(issue => issue.CreatedAt ?? DateTimeOffset.MaxValue)
+            .ThenBy(issue => issue.Identifier, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(issue => issue.Id, StringComparer.OrdinalIgnoreCase);
     }
 }
