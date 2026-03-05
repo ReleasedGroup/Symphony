@@ -79,7 +79,8 @@ public sealed class CodexAgentRunnerTests
         await File.WriteAllTextAsync(scriptPath, FakeAppServerScript());
 
         var runner = new CodexAgentRunner(NullLogger<CodexAgentRunner>.Instance);
-        var command = $"powershell -NoProfile -ExecutionPolicy Bypass -File {scriptPath}";
+        var escapedScriptPath = scriptPath.Replace("'", "''", StringComparison.Ordinal);
+        var command = $"powershell -NoProfile -ExecutionPolicy Bypass -File '{escapedScriptPath}'";
 
         var result = await runner.RunIssueAsync(CreateRequest("id-4", "#4", workspace.FullName, command, 30_000));
 

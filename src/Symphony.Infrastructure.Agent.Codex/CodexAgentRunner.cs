@@ -198,10 +198,9 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
             throw new InvalidOperationException($"Failed to start command '{request.Command}'.");
         }
 
-        var stderrPumpTask = PumpReaderAsync(process.StandardError, stderrBuffer, cancellationToken);
-
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(request.TimeoutMs);
+        var stderrPumpTask = PumpReaderAsync(process.StandardError, stderrBuffer, timeoutCts.Token);
 
         TerminationOutcome termination = TerminationOutcome.NotNeeded;
         try
@@ -309,7 +308,7 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             termination = await TerminateProcessAsync(process, request.IssueIdentifier, "timed-out app-server run");
-            await SafeAwaitReaderPumpAsync(stderrPumpTask);
+            await SafeAwaitReaderPumpAsync(stderrPumpTask, request.ReadTimeoutMs);
             startedAt.Stop();
 
             var stderr = AppendLine(stderrBuffer.ToText(), $"Command timed out after {request.TimeoutMs}ms.");
@@ -330,7 +329,7 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         catch (Exception ex)
         {
             termination = await TerminateProcessAsync(process, request.IssueIdentifier, "app-server protocol failure");
-            await SafeAwaitReaderPumpAsync(stderrPumpTask);
+            await SafeAwaitReaderPumpAsync(stderrPumpTask, request.ReadTimeoutMs);
             startedAt.Stop();
 
             var stderr = AppendLine(stderrBuffer.ToText(), $"app_server_error: {ex.Message}");
@@ -344,11 +343,14 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                 Duration: startedAt.Elapsed);
         }
 
-        await SafeAwaitReaderPumpAsync(stderrPumpTask);
+        await SafeAwaitReaderPumpAsync(stderrPumpTask, request.ReadTimeoutMs);
         startedAt.Stop();
 
-        var success = string.IsNullOrWhiteSpace(termination.KillError) && termination.ExitedAfterKillAttempt;
-        var exitCode = process.HasExited ? process.ExitCode : (success ? 0 : -1);
+        var exitCode = process.HasExited ? process.ExitCode : -1;
+        var success = process.HasExited &&
+                      process.ExitCode == 0 &&
+                      string.IsNullOrWhiteSpace(termination.KillError) &&
+                      termination.ExitedAfterKillAttempt;
         var stderrText = AppendTerminationDetails(stderrBuffer.ToText(), termination);
 
         return new AgentRunResult(
@@ -452,10 +454,16 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
             KillError: killError);
     }
 
-    private static async Task SafeAwaitReaderPumpAsync(Task readerPumpTask)
+    private static async Task SafeAwaitReaderPumpAsync(Task readerPumpTask, int maxWaitMs)
     {
         try
         {
+            var completedTask = await Task.WhenAny(readerPumpTask, Task.Delay(maxWaitMs));
+            if (completedTask != readerPumpTask)
+            {
+                return;
+            }
+
             await readerPumpTask;
         }
         catch
