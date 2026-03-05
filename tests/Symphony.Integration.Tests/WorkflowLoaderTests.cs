@@ -44,6 +44,11 @@ public sealed class WorkflowLoaderTests
         Assert.Equal("./workspaces/repo", definition.Runtime.Workspace.SharedClonePath);
         Assert.Equal("./workspaces/worktrees", definition.Runtime.Workspace.WorktreesRoot);
         Assert.Equal("main", definition.Runtime.Workspace.BaseBranch);
+        Assert.Null(definition.Runtime.Hooks.AfterCreate);
+        Assert.Null(definition.Runtime.Hooks.BeforeRun);
+        Assert.Null(definition.Runtime.Hooks.AfterRun);
+        Assert.Null(definition.Runtime.Hooks.BeforeRemove);
+        Assert.Equal(60_000, definition.Runtime.Hooks.TimeoutMs);
         Assert.Equal("codex app-server", definition.Runtime.Codex.Command);
         Assert.Equal(3_600_000, definition.Runtime.Codex.TimeoutMs);
         Assert.Equal("never", definition.Runtime.Codex.ApprovalPolicy);
@@ -130,6 +135,43 @@ public sealed class WorkflowLoaderTests
     }
 
     [Fact]
+    public async Task LoadAsync_ShouldParseHookSettings()
+    {
+        var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+        await File.WriteAllTextAsync(workflowPath, """
+            ---
+            tracker:
+              kind: github
+              api_key: test-token
+              owner: released
+              repo: symphony
+            hooks:
+              after_create: |
+                echo setup
+              before_run: |
+                echo before
+              after_run: |
+                echo after
+              before_remove: |
+                echo cleanup
+              timeout_ms: 120000
+            ---
+            Prompt body.
+            """);
+
+        var loader = new WorkflowLoader();
+        var definition = await loader.LoadAsync(workflowPath);
+
+        Assert.Equal("echo setup\n", definition.Runtime.Hooks.AfterCreate);
+        Assert.Equal("echo before\n", definition.Runtime.Hooks.BeforeRun);
+        Assert.Equal("echo after\n", definition.Runtime.Hooks.AfterRun);
+        Assert.Equal("echo cleanup\n", definition.Runtime.Hooks.BeforeRemove);
+        Assert.Equal(120000, definition.Runtime.Hooks.TimeoutMs);
+
+        File.Delete(workflowPath);
+    }
+
+    [Fact]
     public async Task LoadAsync_ShouldRejectInvalidCodexTimeout()
     {
         var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
@@ -173,6 +215,30 @@ public sealed class WorkflowLoaderTests
         var loader = new WorkflowLoader();
         var ex = await Assert.ThrowsAsync<WorkflowLoadException>(() => loader.LoadAsync(workflowPath));
         Assert.Equal("invalid_codex_read_timeout", ex.Code);
+
+        File.Delete(workflowPath);
+    }
+
+    [Fact]
+    public async Task LoadAsync_ShouldRejectInvalidHooksTimeout()
+    {
+        var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+        await File.WriteAllTextAsync(workflowPath, """
+            ---
+            tracker:
+              kind: github
+              api_key: test-token
+              owner: released
+              repo: symphony
+            hooks:
+              timeout_ms: 0
+            ---
+            Prompt body.
+            """);
+
+        var loader = new WorkflowLoader();
+        var ex = await Assert.ThrowsAsync<WorkflowLoadException>(() => loader.LoadAsync(workflowPath));
+        Assert.Equal("invalid_hooks_timeout", ex.Code);
 
         File.Delete(workflowPath);
     }

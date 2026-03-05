@@ -172,6 +172,17 @@ public sealed class WorkflowLoader
             throw new WorkflowLoadException("invalid_workspace_base_branch", "workspace.base_branch must be non-empty.");
         }
 
+        var hooksMap = GetOptionalMap(config, "hooks");
+        var hooksAfterCreate = GetOptionalScriptFromOptionalMap(hooksMap, "after_create");
+        var hooksBeforeRun = GetOptionalScriptFromOptionalMap(hooksMap, "before_run");
+        var hooksAfterRun = GetOptionalScriptFromOptionalMap(hooksMap, "after_run");
+        var hooksBeforeRemove = GetOptionalScriptFromOptionalMap(hooksMap, "before_remove");
+        var hooksTimeoutMs = GetOptionalInt(hooksMap, "timeout_ms", 60_000);
+        if (hooksTimeoutMs <= 0)
+        {
+            throw new WorkflowLoadException("invalid_hooks_timeout", "hooks.timeout_ms must be > 0.");
+        }
+
         var codexMap = GetOptionalMap(config, "codex");
         var codexCommand = GetOptionalStringFromOptionalMap(codexMap, "command") ?? "codex app-server";
         if (string.IsNullOrWhiteSpace(codexCommand))
@@ -228,6 +239,12 @@ public sealed class WorkflowLoader
                 worktreesRoot,
                 baseBranch,
                 remoteUrl),
+            new WorkflowHooksSettings(
+                hooksAfterCreate,
+                hooksBeforeRun,
+                hooksAfterRun,
+                hooksBeforeRemove,
+                hooksTimeoutMs),
             new WorkflowCodexSettings(
                 codexCommand,
                 codexTimeoutMs,
@@ -285,6 +302,21 @@ public sealed class WorkflowLoader
         }
 
         return GetOptionalString(source, key);
+    }
+
+    private static string? GetOptionalScriptFromOptionalMap(Dictionary<string, object?>? source, string key)
+    {
+        if (source is null || !source.TryGetValue(key, out var raw) || raw is null)
+        {
+            return null;
+        }
+
+        if (raw is not string script)
+        {
+            throw new WorkflowLoadException("workflow_parse_error", $"'{key}' must be a string.");
+        }
+
+        return string.IsNullOrWhiteSpace(script) ? null : script;
     }
 
     private static string? GetOptionalStringOrNumber(Dictionary<string, object?> source, string key)

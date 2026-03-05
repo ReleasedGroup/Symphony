@@ -107,6 +107,14 @@ app.MapGet("/api/v1/runtime", async (
                 definition.Runtime.Workspace.WorktreesRoot,
                 definition.Runtime.Workspace.BaseBranch,
                 definition.Runtime.Workspace.RemoteUrl
+            },
+            hooks = new
+            {
+                definition.Runtime.Hooks.AfterCreate,
+                definition.Runtime.Hooks.BeforeRun,
+                definition.Runtime.Hooks.AfterRun,
+                definition.Runtime.Hooks.BeforeRemove,
+                definition.Runtime.Hooks.TimeoutMs
             }
         };
     }

@@ -25,6 +25,7 @@ public sealed class OrchestrationTickServiceTests
         ]);
         var coordinationStore = new FakeCoordinationStore(leaseGranted: true);
         var workspaceManager = new FakeWorkspaceManager();
+        var hookRunner = new FakeWorkspaceHookRunner();
         var agentRunner = new FakeAgentRunner();
 
         var service = CreateService(
@@ -32,6 +33,7 @@ public sealed class OrchestrationTickServiceTests
             tracker,
             coordinationStore,
             workspaceManager,
+            hookRunner,
             agentRunner);
 
         var interval = await service.RunTickAsync(CancellationToken.None);
@@ -57,6 +59,7 @@ public sealed class OrchestrationTickServiceTests
             leaseGranted: true,
             unclaimableIssueIds: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "issue-3" });
         var workspaceManager = new FakeWorkspaceManager();
+        var hookRunner = new FakeWorkspaceHookRunner();
         var agentRunner = new FakeAgentRunner();
 
         var service = CreateService(
@@ -64,6 +67,7 @@ public sealed class OrchestrationTickServiceTests
             tracker,
             coordinationStore,
             workspaceManager,
+            hookRunner,
             agentRunner);
 
         var interval = await service.RunTickAsync(CancellationToken.None);
@@ -85,6 +89,7 @@ public sealed class OrchestrationTickServiceTests
         ]);
         var coordinationStore = new FakeCoordinationStore(leaseGranted: false);
         var workspaceManager = new FakeWorkspaceManager();
+        var hookRunner = new FakeWorkspaceHookRunner();
         var agentRunner = new FakeAgentRunner();
 
         var service = CreateService(
@@ -92,6 +97,7 @@ public sealed class OrchestrationTickServiceTests
             tracker,
             coordinationStore,
             workspaceManager,
+            hookRunner,
             agentRunner);
 
         var interval = await service.RunTickAsync(CancellationToken.None);
@@ -101,11 +107,122 @@ public sealed class OrchestrationTickServiceTests
         Assert.Empty(coordinationStore.ReleaseCalls);
     }
 
+    [Fact]
+    public async Task RunTickAsync_ShouldRunAfterCreateBeforeRunAndAfterRunHooks()
+    {
+        var workflow = BuildWorkflowDefinition(
+            maxConcurrentAgents: 1,
+            hooks: new WorkflowHooksSettings(
+                AfterCreate: "echo after-create",
+                BeforeRun: "echo before-run",
+                AfterRun: "echo after-run",
+                BeforeRemove: null,
+                TimeoutMs: 60_000));
+        var tracker = new FakeTrackerClient(
+        [
+            BuildIssue("issue-1", "#1", priority: 1, createdAt: DateTimeOffset.UtcNow)
+        ]);
+        var coordinationStore = new FakeCoordinationStore(leaseGranted: true);
+        var workspaceManager = new FakeWorkspaceManager(createdNow: true);
+        var hookRunner = new FakeWorkspaceHookRunner();
+        var agentRunner = new FakeAgentRunner();
+
+        var service = CreateService(
+            workflow,
+            tracker,
+            coordinationStore,
+            workspaceManager,
+            hookRunner,
+            agentRunner);
+
+        var interval = await service.RunTickAsync(CancellationToken.None);
+
+        Assert.Equal(workflow.Runtime.Polling.IntervalMs, interval);
+        Assert.Equal(["after_create", "before_run", "after_run"], hookRunner.ExecutedHooks);
+        Assert.Equal(["issue-1"], agentRunner.RunIssueIds);
+        Assert.Equal("agent_succeeded", coordinationStore.ReleaseCalls.Single().ReleaseStatus);
+    }
+
+    [Fact]
+    public async Task RunTickAsync_ShouldFailAttemptWhenBeforeRunHookFails()
+    {
+        var workflow = BuildWorkflowDefinition(
+            maxConcurrentAgents: 1,
+            hooks: new WorkflowHooksSettings(
+                AfterCreate: null,
+                BeforeRun: "echo before-run",
+                AfterRun: "echo after-run",
+                BeforeRemove: null,
+                TimeoutMs: 60_000));
+        var tracker = new FakeTrackerClient(
+        [
+            BuildIssue("issue-1", "#1", priority: 1, createdAt: DateTimeOffset.UtcNow)
+        ]);
+        var coordinationStore = new FakeCoordinationStore(leaseGranted: true);
+        var workspaceManager = new FakeWorkspaceManager(createdNow: true);
+        var hookRunner = new FakeWorkspaceHookRunner(
+            failingHooks: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "before_run" });
+        var agentRunner = new FakeAgentRunner();
+
+        var service = CreateService(
+            workflow,
+            tracker,
+            coordinationStore,
+            workspaceManager,
+            hookRunner,
+            agentRunner);
+
+        var interval = await service.RunTickAsync(CancellationToken.None);
+
+        Assert.Equal(workflow.Runtime.Polling.IntervalMs, interval);
+        Assert.Equal(["before_run"], hookRunner.ExecutedHooks);
+        Assert.Empty(agentRunner.RunIssueIds);
+        Assert.Equal("before_run_failed", coordinationStore.ReleaseCalls.Single().ReleaseStatus);
+    }
+
+    [Fact]
+    public async Task RunTickAsync_ShouldIgnoreAfterRunHookFailure()
+    {
+        var workflow = BuildWorkflowDefinition(
+            maxConcurrentAgents: 1,
+            hooks: new WorkflowHooksSettings(
+                AfterCreate: null,
+                BeforeRun: "echo before-run",
+                AfterRun: "echo after-run",
+                BeforeRemove: null,
+                TimeoutMs: 60_000));
+        var tracker = new FakeTrackerClient(
+        [
+            BuildIssue("issue-1", "#1", priority: 1, createdAt: DateTimeOffset.UtcNow)
+        ]);
+        var coordinationStore = new FakeCoordinationStore(leaseGranted: true);
+        var workspaceManager = new FakeWorkspaceManager(createdNow: true);
+        var hookRunner = new FakeWorkspaceHookRunner(
+            failingHooks: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "after_run" });
+        var agentRunner = new FakeAgentRunner();
+
+        var service = CreateService(
+            workflow,
+            tracker,
+            coordinationStore,
+            workspaceManager,
+            hookRunner,
+            agentRunner);
+
+        var interval = await service.RunTickAsync(CancellationToken.None);
+
+        Assert.Equal(workflow.Runtime.Polling.IntervalMs, interval);
+        Assert.Equal(["before_run", "after_run"], hookRunner.ExecutedHooks);
+        Assert.Equal(["issue-1"], agentRunner.RunIssueIds);
+        Assert.Equal("agent_succeeded", coordinationStore.ReleaseCalls.Single().ReleaseStatus);
+    }
+
     private static OrchestrationTickService CreateService(
         WorkflowDefinition workflowDefinition,
         FakeTrackerClient tracker,
         FakeCoordinationStore coordinationStore,
         FakeWorkspaceManager workspaceManager,
+        FakeWorkspaceHookRunner hookRunner,
         FakeAgentRunner agentRunner)
     {
         return new OrchestrationTickService(
@@ -114,6 +231,7 @@ public sealed class OrchestrationTickServiceTests
             tracker,
             coordinationStore,
             workspaceManager,
+            hookRunner,
             agentRunner,
             Options.Create(new OrchestrationOptions
             {
@@ -124,7 +242,7 @@ public sealed class OrchestrationTickServiceTests
             NullLogger<OrchestrationTickService>.Instance);
     }
 
-    private static WorkflowDefinition BuildWorkflowDefinition(int maxConcurrentAgents)
+    private static WorkflowDefinition BuildWorkflowDefinition(int maxConcurrentAgents, WorkflowHooksSettings? hooks = null)
     {
         var runtime = new WorkflowRuntimeSettings(
             new WorkflowTrackerSettings(
@@ -145,6 +263,12 @@ public sealed class OrchestrationTickServiceTests
                 WorktreesRoot: "./workspaces/worktrees",
                 BaseBranch: "main",
                 RemoteUrl: null),
+            hooks ?? new WorkflowHooksSettings(
+                AfterCreate: null,
+                BeforeRun: null,
+                AfterRun: null,
+                BeforeRemove: null,
+                TimeoutMs: 60_000),
             new WorkflowCodexSettings(
                 Command: "echo ok",
                 TimeoutMs: 30_000,
@@ -249,7 +373,7 @@ public sealed class OrchestrationTickServiceTests
         }
     }
 
-    private sealed class FakeWorkspaceManager : IWorkspaceManager
+    private sealed class FakeWorkspaceManager(bool createdNow = true) : IWorkspaceManager
     {
         public Task<WorkspacePreparationResult> PrepareIssueWorkspaceAsync(
             WorkspacePreparationRequest request,
@@ -258,7 +382,27 @@ public sealed class OrchestrationTickServiceTests
             return Task.FromResult(new WorkspacePreparationResult(
                 WorkspacePath: $"C:\\tmp\\{request.IssueIdentifier}",
                 BranchName: request.SuggestedBranchName ?? "symphony/test",
-                CreatedNow: true));
+                CreatedNow: createdNow));
+        }
+    }
+
+    private sealed class FakeWorkspaceHookRunner(IReadOnlySet<string>? failingHooks = null) : IWorkspaceHookRunner
+    {
+        private readonly HashSet<string> _failingHooks = failingHooks is null
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(failingHooks, StringComparer.OrdinalIgnoreCase);
+
+        public List<string> ExecutedHooks { get; } = [];
+
+        public Task RunHookAsync(WorkspaceHookRequest request, CancellationToken cancellationToken = default)
+        {
+            ExecutedHooks.Add(request.HookName);
+            if (_failingHooks.Contains(request.HookName))
+            {
+                throw new WorkspaceHookExecutionException(request.HookName, $"{request.HookName} failed");
+            }
+
+            return Task.CompletedTask;
         }
     }
 

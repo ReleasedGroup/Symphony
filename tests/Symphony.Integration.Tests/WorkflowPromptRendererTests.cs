@@ -49,6 +49,12 @@ public sealed class WorkflowPromptRendererTests
                 WorktreesRoot: "./workspaces/worktrees",
                 BaseBranch: "main",
                 RemoteUrl: null),
+            new WorkflowHooksSettings(
+                AfterCreate: null,
+                BeforeRun: null,
+                AfterRun: null,
+                BeforeRemove: null,
+                TimeoutMs: 60_000),
             new WorkflowCodexSettings(
                 Command: "codex app-server",
                 TimeoutMs: 3600000,
