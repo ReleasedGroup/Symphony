@@ -475,6 +475,14 @@ public sealed class OrchestrationTickServiceTests
 
             return Task.FromResult<IReadOnlyList<NormalizedIssue>>(terminalIssues ?? []);
         }
+
+        public Task<IReadOnlyList<IssueStateSnapshot>> FetchIssueStatesByIdsAsync(
+            TrackerQuery query,
+            IReadOnlyList<string> issueIds,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<IssueStateSnapshot>>([]);
+        }
     }
 
     private sealed class FakeCoordinationStore(bool leaseGranted, IReadOnlySet<string>? unclaimableIssueIds = null) : IOrchestrationCoordinationStore

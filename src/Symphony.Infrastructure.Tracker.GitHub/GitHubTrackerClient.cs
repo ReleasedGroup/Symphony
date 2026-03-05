@@ -8,7 +8,7 @@ namespace Symphony.Infrastructure.Tracker.GitHub;
 
 public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHubTrackerClient
 {
-    private const string GraphQlQuery = """
+    private const string GraphQlIssuesQuery = """
         query($owner: String!, $repo: String!, $states: [IssueState!], $labels: [String!], $first: Int!, $after: String) {
           repository(owner: $owner, name: $repo) {
             issues(states: $states, labels: $labels, first: $first, after: $after, orderBy: { field: CREATED_AT, direction: ASC }) {
@@ -50,6 +50,23 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         }
         """;
 
+    private const string GraphQlIssueStatesByIdsQuery = """
+        query($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on Issue {
+              id
+              state
+              repository {
+                name
+                owner {
+                  login
+                }
+              }
+            }
+          }
+        }
+        """;
+
     public async Task<IReadOnlyList<NormalizedIssue>> FetchCandidateIssuesAsync(
         TrackerQuery query,
         CancellationToken cancellationToken = default)
@@ -73,6 +90,108 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
             cancellationToken);
     }
 
+    public async Task<IReadOnlyList<IssueStateSnapshot>> FetchIssueStatesByIdsAsync(
+        TrackerQuery query,
+        IReadOnlyList<string> issueIds,
+        CancellationToken cancellationToken = default)
+    {
+        if (issueIds.Count == 0)
+        {
+            return [];
+        }
+
+        var endpoint = string.IsNullOrWhiteSpace(query.Endpoint) ? "https://api.github.com/graphql" : query.Endpoint;
+        var orderedIds = issueIds
+            .Where(static id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var statesById = new Dictionary<string, IssueStateSnapshot>(StringComparer.OrdinalIgnoreCase);
+        foreach (var issueIdBatch in orderedIds.Chunk(100))
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", query.ApiKey);
+            request.Headers.UserAgent.Add(new ProductInfoHeaderValue("Symphony", "1.0"));
+            request.Content = JsonContent.Create(new
+            {
+                query = GraphQlIssueStatesByIdsQuery,
+                variables = new
+                {
+                    ids = issueIdBatch
+                }
+            });
+
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException($"github_api_status: {(int)response.StatusCode}");
+            }
+
+            await using var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(contentStream, cancellationToken: cancellationToken);
+
+            if (document.RootElement.TryGetProperty("errors", out var errorsElement) &&
+                errorsElement.ValueKind == JsonValueKind.Array &&
+                errorsElement.GetArrayLength() > 0)
+            {
+                throw new InvalidOperationException("github_graphql_errors");
+            }
+
+            if (!document.RootElement.TryGetProperty("data", out var dataElement) ||
+                !dataElement.TryGetProperty("nodes", out var nodesElement) ||
+                nodesElement.ValueKind != JsonValueKind.Array)
+            {
+                throw new InvalidOperationException("github_unknown_payload");
+            }
+
+            foreach (var issueNode in nodesElement.EnumerateArray())
+            {
+                if (issueNode.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                if (!issueNode.TryGetProperty("repository", out var repositoryNode) ||
+                    repositoryNode.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                var owner = repositoryNode.TryGetProperty("owner", out var ownerNode)
+                    ? GetOptionalString(ownerNode, "login")
+                    : null;
+                var repo = GetOptionalString(repositoryNode, "name");
+
+                if (!string.Equals(owner, query.Owner, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(repo, query.Repo, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var issueId = GetOptionalString(issueNode, "id");
+                if (string.IsNullOrWhiteSpace(issueId))
+                {
+                    continue;
+                }
+
+                var issueState = GetOptionalString(issueNode, "state") ?? "OPEN";
+                var normalizedState = issueState.Equals("CLOSED", StringComparison.OrdinalIgnoreCase) ? "Closed" : "Open";
+                statesById[issueId] = new IssueStateSnapshot(issueId, normalizedState);
+            }
+        }
+
+        var result = new List<IssueStateSnapshot>(statesById.Count);
+        foreach (var issueId in orderedIds)
+        {
+            if (statesById.TryGetValue(issueId, out var state))
+            {
+                result.Add(state);
+            }
+        }
+
+        return result;
+    }
+
     private async Task<IReadOnlyList<NormalizedIssue>> FetchIssuesInternalAsync(
         TrackerQuery query,
         IReadOnlyList<string> states,
@@ -93,7 +212,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
             request.Headers.UserAgent.Add(new ProductInfoHeaderValue("Symphony", "1.0"));
             request.Content = JsonContent.Create(new
             {
-                query = GraphQlQuery,
+                query = GraphQlIssuesQuery,
                 variables = new
                 {
                     owner = query.Owner,
@@ -150,9 +269,22 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
 
             var pageInfo = issuesElement.GetProperty("pageInfo");
             hasNextPage = pageInfo.GetProperty("hasNextPage").GetBoolean();
-            cursor = hasNextPage && pageInfo.TryGetProperty("endCursor", out var endCursor)
-                ? endCursor.GetString()
-                : null;
+            if (!hasNextPage)
+            {
+                cursor = null;
+                continue;
+            }
+
+            if (!pageInfo.TryGetProperty("endCursor", out var endCursor))
+            {
+                throw new InvalidOperationException("github_missing_end_cursor");
+            }
+
+            cursor = endCursor.GetString();
+            if (string.IsNullOrWhiteSpace(cursor))
+            {
+                throw new InvalidOperationException("github_missing_end_cursor");
+            }
         }
 
         return candidateIssues;

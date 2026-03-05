@@ -160,6 +160,111 @@ public sealed class GitHubTrackerClientTests
         Assert.Equal("Closed", issue.State);
     }
 
+    [Fact]
+    public async Task FetchCandidateIssuesAsync_ShouldFailWhenNextPageCursorMissing()
+    {
+        const string payload = """
+            {
+              "data": {
+                "repository": {
+                  "issues": {
+                    "pageInfo": {
+                      "hasNextPage": true,
+                      "endCursor": null
+                    },
+                    "nodes": []
+                  }
+                }
+              }
+            }
+            """;
+
+        using var httpClient = new HttpClient(new StaticJsonHandler(payload))
+        {
+            BaseAddress = new Uri("https://api.github.com/graphql")
+        };
+
+        var client = new GitHubTrackerClient(httpClient);
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.FetchCandidateIssuesAsync(new TrackerQuery(
+                Endpoint: "https://api.github.com/graphql",
+                ApiKey: "token",
+                Owner: "released",
+                Repo: "symphony",
+                ActiveStates: ["Open"],
+                Labels: [],
+                Milestone: null)));
+
+        Assert.Contains("github_missing_end_cursor", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FetchIssueStatesByIdsAsync_ShouldReturnOnlyScopedIssueStates()
+    {
+        const string payload = """
+            {
+              "data": {
+                "nodes": [
+                  {
+                    "id": "I_100",
+                    "state": "OPEN",
+                    "repository": {
+                      "name": "symphony",
+                      "owner": { "login": "released" }
+                    }
+                  },
+                  {
+                    "id": "I_200",
+                    "state": "CLOSED",
+                    "repository": {
+                      "name": "symphony",
+                      "owner": { "login": "released" }
+                    }
+                  },
+                  {
+                    "id": "I_999",
+                    "state": "CLOSED",
+                    "repository": {
+                      "name": "other",
+                      "owner": { "login": "released" }
+                    }
+                  }
+                ]
+              }
+            }
+            """;
+
+        using var httpClient = new HttpClient(new StaticJsonHandler(payload))
+        {
+            BaseAddress = new Uri("https://api.github.com/graphql")
+        };
+
+        var client = new GitHubTrackerClient(httpClient);
+        var states = await client.FetchIssueStatesByIdsAsync(
+            new TrackerQuery(
+                Endpoint: "https://api.github.com/graphql",
+                ApiKey: "token",
+                Owner: "released",
+                Repo: "symphony",
+                ActiveStates: ["Open"],
+                Labels: [],
+                Milestone: null),
+            issueIds: ["I_200", "I_100", "I_999", "I_404"]);
+
+        Assert.Collection(
+            states,
+            state =>
+            {
+                Assert.Equal("I_200", state.Id);
+                Assert.Equal("Closed", state.State);
+            },
+            state =>
+            {
+                Assert.Equal("I_100", state.Id);
+                Assert.Equal("Open", state.State);
+            });
+    }
+
     private sealed class StaticJsonHandler(string json) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
