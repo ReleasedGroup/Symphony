@@ -7,4 +7,9 @@ public interface IGitHubTrackerClient
     Task<IReadOnlyList<NormalizedIssue>> FetchCandidateIssuesAsync(
         TrackerQuery query,
         CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<NormalizedIssue>> FetchIssuesByStatesAsync(
+        TrackerQuery query,
+        IReadOnlyList<string> states,
+        CancellationToken cancellationToken = default);
 }

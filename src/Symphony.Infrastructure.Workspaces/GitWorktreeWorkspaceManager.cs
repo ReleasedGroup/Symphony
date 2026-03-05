@@ -8,6 +8,7 @@ using Symphony.Core.Models;
 namespace Symphony.Infrastructure.Workspaces;
 
 public sealed partial class GitWorktreeWorkspaceManager(
+    IWorkspaceHookRunner workspaceHookRunner,
     ILogger<GitWorktreeWorkspaceManager> logger) : IWorkspaceManager
 {
     public async Task<WorkspacePreparationResult> PrepareIssueWorkspaceAsync(
@@ -75,6 +76,88 @@ public sealed partial class GitWorktreeWorkspaceManager(
         return new WorkspacePreparationResult(worktreePath, branchName, CreatedNow: true);
     }
 
+    public async Task<WorkspaceCleanupResult> CleanupIssueWorkspaceAsync(
+        WorkspaceCleanupRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(request.WorkspaceRoot))
+        {
+            throw new InvalidOperationException("workspace.root must be configured.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.WorktreesRoot))
+        {
+            throw new InvalidOperationException("workspace.worktrees_root must be configured.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.SharedClonePath))
+        {
+            throw new InvalidOperationException("workspace.shared_clone_path must be configured.");
+        }
+
+        var rootPath = GetAbsolutePath(request.WorkspaceRoot);
+        var sharedClonePath = GetAbsolutePath(request.SharedClonePath);
+        var worktreesRootPath = GetAbsolutePath(request.WorktreesRoot);
+        var issueKey = SanitizeIssueIdentifier(request.IssueIdentifier);
+        var worktreePath = Path.Combine(worktreesRootPath, issueKey);
+
+        EnsurePathIsWithinRoot(rootPath, sharedClonePath);
+        EnsurePathIsWithinRoot(rootPath, worktreesRootPath);
+        EnsurePathIsWithinRoot(worktreesRootPath, worktreePath);
+
+        if (!Directory.Exists(worktreePath))
+        {
+            return new WorkspaceCleanupResult(worktreePath, Existed: false, RemovedNow: false);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.BeforeRemoveHook))
+        {
+            try
+            {
+                await workspaceHookRunner.RunHookAsync(
+                    new WorkspaceHookRequest(
+                        HookName: "before_remove",
+                        Script: request.BeforeRemoveHook,
+                        WorkspacePath: worktreePath,
+                        TimeoutMs: request.HookTimeoutMs,
+                        IssueIdentifier: request.IssueIdentifier),
+                    cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    ex,
+                    "before_remove hook failed for workspace {WorkspacePath}. Cleanup will continue.",
+                    worktreePath);
+            }
+        }
+
+        var removedNow = await RemoveWorktreePathAsync(sharedClonePath, worktreePath, cancellationToken);
+        if (removedNow)
+        {
+            logger.LogInformation(
+                "Removed workspace {WorkspacePath} for issue {IssueIdentifier}.",
+                worktreePath,
+                request.IssueIdentifier);
+        }
+        else
+        {
+            logger.LogWarning(
+                "Workspace cleanup did not remove path {WorkspacePath} for issue {IssueIdentifier}.",
+                worktreePath,
+                request.IssueIdentifier);
+        }
+
+        return new WorkspaceCleanupResult(
+            WorkspacePath: worktreePath,
+            Existed: true,
+            RemovedNow: removedNow);
+    }
+
     private static string GetAbsolutePath(string path) =>
         Path.GetFullPath(path);
 
@@ -138,6 +221,56 @@ public sealed partial class GitWorktreeWorkspaceManager(
         return result.ExitCode == 0;
     }
 
+    private async Task<bool> RemoveWorktreePathAsync(
+        string sharedClonePath,
+        string worktreePath,
+        CancellationToken cancellationToken)
+    {
+        var gitDirectoryPath = Path.Combine(sharedClonePath, ".git");
+        if (Directory.Exists(gitDirectoryPath))
+        {
+            var removeResult = await RunGitAsync(
+                sharedClonePath,
+                ["worktree", "remove", "--force", worktreePath],
+                cancellationToken,
+                throwOnNonZeroExitCode: false);
+
+            if (removeResult.ExitCode != 0)
+            {
+                logger.LogWarning(
+                    "git worktree remove failed for {WorkspacePath}. ExitCode={ExitCode}. StdErr={StdErr}",
+                    worktreePath,
+                    removeResult.ExitCode,
+                    TruncateForLog(removeResult.Stderr, 2_000));
+            }
+
+            _ = await RunGitAsync(
+                sharedClonePath,
+                ["worktree", "prune"],
+                cancellationToken,
+                throwOnNonZeroExitCode: false);
+        }
+
+        if (!Directory.Exists(worktreePath))
+        {
+            return true;
+        }
+
+        try
+        {
+            Directory.Delete(worktreePath, recursive: true);
+            return !Directory.Exists(worktreePath);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "Failed to remove workspace path {WorkspacePath} directly after git cleanup attempt.",
+                worktreePath);
+            return false;
+        }
+    }
+
     private async Task<GitResult> RunGitAsync(
         string? workingDirectory,
         IReadOnlyList<string> arguments,
@@ -199,6 +332,22 @@ public sealed partial class GitWorktreeWorkspaceManager(
     }
 
     private sealed record GitResult(int ExitCode, string Stdout, string Stderr);
+
+    private static string TruncateForLog(string value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = value.Trim();
+        if (trimmed.Length <= maxLength)
+        {
+            return trimmed;
+        }
+
+        return $"{trimmed[..maxLength]}...";
+    }
 
     [GeneratedRegex(@"[^a-zA-Z0-9._-]+")]
     private static partial Regex IssueIdentifierRegex();

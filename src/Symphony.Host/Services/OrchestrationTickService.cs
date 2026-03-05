@@ -19,15 +19,126 @@ public sealed class OrchestrationTickService(
     IOptions<OrchestrationOptions> orchestrationOptions,
     ILogger<OrchestrationTickService> logger)
 {
+    public async Task RunStartupCleanupAsync(CancellationToken cancellationToken)
+    {
+        var workflowDefinition = await workflowDefinitionProvider.GetCurrentAsync(cancellationToken);
+        var instanceId = ResolveInstanceId(orchestrationOptions.Value);
+        var leaseName = string.IsNullOrWhiteSpace(orchestrationOptions.Value.LeaseName)
+            ? "poll-dispatch"
+            : orchestrationOptions.Value.LeaseName;
+        var leaseTtl = TimeSpan.FromSeconds(orchestrationOptions.Value.LeaseTtlSeconds);
+
+        var hasLease = await coordinationStore.AcquireOrRenewLeaseAsync(
+            leaseName,
+            instanceId,
+            leaseTtl,
+            cancellationToken);
+
+        if (!hasLease)
+        {
+            logger.LogDebug(
+                "Skipping startup terminal cleanup because lease '{LeaseName}' is owned by another instance. InstanceId={InstanceId}",
+                leaseName,
+                instanceId);
+            return;
+        }
+
+        try
+        {
+            var apiKey = ResolveApiKey(workflowDefinition.Runtime.Tracker.ApiKey);
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                logger.LogWarning(
+                    "Skipping startup terminal cleanup. tracker.api_key is missing after environment resolution for workflow {WorkflowPath}.",
+                    workflowDefinition.SourcePath);
+                return;
+            }
+
+            var terminalStates = workflowDefinition.Runtime.Tracker.TerminalStates;
+            if (terminalStates.Count == 0)
+            {
+                logger.LogDebug("Skipping startup terminal cleanup because tracker.terminal_states is empty.");
+                return;
+            }
+
+            var query = new TrackerQuery(
+                workflowDefinition.Runtime.Tracker.Endpoint,
+                apiKey,
+                workflowDefinition.Runtime.Tracker.Owner,
+                workflowDefinition.Runtime.Tracker.Repo,
+                ActiveStates: terminalStates,
+                Labels: [],
+                Milestone: null);
+
+            IReadOnlyList<NormalizedIssue> terminalIssues;
+            try
+            {
+                terminalIssues = await trackerClient.FetchIssuesByStatesAsync(query, terminalStates, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Startup terminal cleanup could not fetch terminal issues for {Owner}/{Repo}. Continuing startup.",
+                    query.Owner,
+                    query.Repo);
+                return;
+            }
+
+            logger.LogInformation(
+                "Startup terminal cleanup fetched {IssueCount} terminal issues from {Owner}/{Repo}.",
+                terminalIssues.Count,
+                query.Owner,
+                query.Repo);
+
+            foreach (var issue in terminalIssues)
+            {
+                try
+                {
+                    var cleanupResult = await workspaceManager.CleanupIssueWorkspaceAsync(
+                        new WorkspaceCleanupRequest(
+                            IssueIdentifier: issue.Identifier,
+                            WorkspaceRoot: workflowDefinition.Runtime.Workspace.Root,
+                            SharedClonePath: workflowDefinition.Runtime.Workspace.SharedClonePath,
+                            WorktreesRoot: workflowDefinition.Runtime.Workspace.WorktreesRoot,
+                            BeforeRemoveHook: workflowDefinition.Runtime.Hooks.BeforeRemove,
+                            HookTimeoutMs: workflowDefinition.Runtime.Hooks.TimeoutMs),
+                        cancellationToken);
+
+                    if (cleanupResult.RemovedNow)
+                    {
+                        logger.LogInformation(
+                            "Startup terminal cleanup removed workspace {WorkspacePath} for issue {IssueIdentifier}.",
+                            cleanupResult.WorkspacePath,
+                            issue.Identifier);
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(
+                        ex,
+                        "Startup terminal cleanup failed for issue {IssueIdentifier}. Continuing startup.",
+                        issue.Identifier);
+                }
+            }
+        }
+        finally
+        {
+            await coordinationStore.ReleaseLeaseAsync(leaseName, instanceId, cancellationToken);
+        }
+    }
+
     public async Task<int?> RunTickAsync(CancellationToken cancellationToken)
     {
         var workflowDefinition = await workflowDefinitionProvider.GetCurrentAsync(cancellationToken);
-        if (!string.IsNullOrWhiteSpace(workflowDefinition.Runtime.Hooks.BeforeRemove))
-        {
-            logger.LogWarning(
-                "hooks.before_remove is configured but cleanup execution is not implemented yet.");
-        }
-
         var instanceId = ResolveInstanceId(orchestrationOptions.Value);
         var leaseName = string.IsNullOrWhiteSpace(orchestrationOptions.Value.LeaseName)
             ? "poll-dispatch"
