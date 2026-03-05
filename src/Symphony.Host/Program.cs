@@ -1,9 +1,12 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using Symphony.Core.Configuration;
+using Symphony.Host.Services;
+using Symphony.Host.Workers;
 using Symphony.Infrastructure.Persistence.Sqlite;
 using Symphony.Infrastructure.Persistence.Sqlite.Storage;
-using Symphony.Host.Workers;
+using Symphony.Infrastructure.Tracker.GitHub;
+using Symphony.Infrastructure.Workflows;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,7 +25,16 @@ builder.Services
     .Validate(ValidateRuntimeOptions, "Symphony runtime options are invalid.")
     .ValidateOnStart();
 
+builder.Services
+    .AddOptions<OrchestrationOptions>()
+    .Bind(builder.Configuration.GetSection(OrchestrationOptions.SectionName))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+
 builder.Services.AddSymphonySqlitePersistence(builder.Configuration);
+builder.Services.AddSymphonyWorkflowServices(builder.Configuration);
+builder.Services.AddSymphonyGitHubTrackerClient();
+builder.Services.AddScoped<OrchestrationTickService>();
 
 builder.Services
     .AddHealthChecks()
@@ -39,34 +51,69 @@ app.MapHealthChecks("/api/v1/health", new HealthCheckOptions
     AllowCachingResponses = false
 });
 
-app.MapGet("/api/v1/runtime", (IOptions<SymphonyRuntimeOptions> runtimeOptions, IOptions<SqliteStorageOptions> storageOptions) =>
+app.MapGet("/api/v1/runtime", async (
+    IOptions<SymphonyRuntimeOptions> runtimeOptions,
+    IOptions<SqliteStorageOptions> storageOptions,
+    IOptions<OrchestrationOptions> orchestrationOptions,
+    IWorkflowDefinitionProvider workflowProvider,
+    CancellationToken cancellationToken) =>
 {
     var options = runtimeOptions.Value;
+
+    object? workflow = null;
+    string? workflowError = null;
+    try
+    {
+        var definition = await workflowProvider.GetCurrentAsync(cancellationToken);
+        workflow = new
+        {
+            definition.SourcePath,
+            definition.LoadedAtUtc,
+            tracker = new
+            {
+                definition.Runtime.Tracker.Kind,
+                definition.Runtime.Tracker.Owner,
+                definition.Runtime.Tracker.Repo,
+                definition.Runtime.Tracker.Milestone,
+                labels = definition.Runtime.Tracker.Labels,
+                activeStates = definition.Runtime.Tracker.ActiveStates,
+                terminalStates = definition.Runtime.Tracker.TerminalStates
+            },
+            polling = new
+            {
+                definition.Runtime.Polling.IntervalMs
+            },
+            agent = new
+            {
+                definition.Runtime.Agent.MaxConcurrentAgents
+            }
+        };
+    }
+    catch (Exception ex)
+    {
+        workflowError = ex.Message;
+    }
+
     return Results.Ok(new
     {
-        tracker = new
+        runtimeDefaults = new
         {
-            options.Tracker.Kind,
-            options.Tracker.Owner,
-            options.Tracker.Repo,
-            options.Tracker.Milestone,
-            labels = options.Tracker.Labels,
-            activeStates = options.Tracker.ActiveStates,
-            terminalStates = options.Tracker.TerminalStates
+            polling = new { options.Polling.IntervalMs },
+            agent = new { options.Agent.MaxConcurrentAgents }
         },
-        polling = new
+        orchestration = new
         {
-            options.Polling.IntervalMs
-        },
-        agent = new
-        {
-            options.Agent.MaxConcurrentAgents
+            orchestrationOptions.Value.InstanceId,
+            orchestrationOptions.Value.LeaseName,
+            orchestrationOptions.Value.LeaseTtlSeconds
         },
         persistence = new
         {
             provider = "sqlite",
             isConfigured = !string.IsNullOrWhiteSpace(storageOptions.Value.ConnectionString)
-        }
+        },
+        workflow,
+        workflowError
     });
 });
 
@@ -78,16 +125,6 @@ return;
 
 static bool ValidateRuntimeOptions(SymphonyRuntimeOptions options)
 {
-    if (!string.Equals(options.Tracker.Kind, "github", StringComparison.OrdinalIgnoreCase))
-    {
-        return false;
-    }
-
-    if (string.IsNullOrWhiteSpace(options.Tracker.Owner) || string.IsNullOrWhiteSpace(options.Tracker.Repo))
-    {
-        return false;
-    }
-
     return options.Polling.IntervalMs >= 1_000 && options.Agent.MaxConcurrentAgents > 0;
 }
 

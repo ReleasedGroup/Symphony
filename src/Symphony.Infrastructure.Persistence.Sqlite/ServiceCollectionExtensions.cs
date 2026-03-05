@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Symphony.Core.Abstractions;
 using Symphony.Infrastructure.Persistence.Sqlite.Storage;
 
 namespace Symphony.Infrastructure.Persistence.Sqlite;
@@ -21,6 +22,9 @@ public static class ServiceCollectionExtensions
             var storageOptions = serviceProvider.GetRequiredService<IOptions<SqliteStorageOptions>>().Value;
             optionsBuilder.UseSqlite(storageOptions.ConnectionString);
         });
+
+        services.AddSingleton(TimeProvider.System);
+        services.AddScoped<IOrchestrationCoordinationStore, OrchestrationCoordinationStore>();
 
         return services;
     }

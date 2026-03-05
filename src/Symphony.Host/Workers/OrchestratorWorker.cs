@@ -1,24 +1,50 @@
 using Microsoft.Extensions.Options;
 using Symphony.Core.Configuration;
+using Symphony.Host.Services;
 
 namespace Symphony.Host.Workers;
 
 public sealed class OrchestratorWorker(
     ILogger<OrchestratorWorker> logger,
-    IOptions<SymphonyRuntimeOptions> runtimeOptions) : BackgroundService
+    IServiceScopeFactory serviceScopeFactory,
+    IOptionsMonitor<SymphonyRuntimeOptions> runtimeOptions) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var pollInterval = TimeSpan.FromMilliseconds(runtimeOptions.Value.Polling.IntervalMs);
-        logger.LogInformation(
-            "Orchestrator worker started. Poll interval: {PollIntervalMs} ms. Max agents: {MaxConcurrentAgents}.",
-            runtimeOptions.Value.Polling.IntervalMs,
-            runtimeOptions.Value.Agent.MaxConcurrentAgents);
+        logger.LogInformation("Orchestrator worker started.");
 
-        using var timer = new PeriodicTimer(pollInterval);
-        while (!stoppingToken.IsCancellationRequested && await timer.WaitForNextTickAsync(stoppingToken))
+        while (!stoppingToken.IsCancellationRequested)
         {
-            logger.LogInformation("Orchestrator poll tick at {UtcNow}.", DateTimeOffset.UtcNow);
+            var pollIntervalMs = runtimeOptions.CurrentValue.Polling.IntervalMs;
+
+            try
+            {
+                await using var scope = serviceScopeFactory.CreateAsyncScope();
+                var tickService = scope.ServiceProvider.GetRequiredService<OrchestrationTickService>();
+                var workflowPollIntervalMs = await tickService.RunTickAsync(stoppingToken);
+                if (workflowPollIntervalMs is > 0)
+                {
+                    pollIntervalMs = workflowPollIntervalMs.Value;
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Orchestrator tick failed.");
+            }
+
+            var pollInterval = TimeSpan.FromMilliseconds(pollIntervalMs);
+            try
+            {
+                await Task.Delay(pollInterval, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
         }
     }
 }
