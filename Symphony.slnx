@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Symphony.Core/Symphony.Core.csproj" />
+    <Project Path="src/Symphony.Host/Symphony.Host.csproj" />
+    <Project Path="src/Symphony.Infrastructure.Agent.Codex/Symphony.Infrastructure.Agent.Codex.csproj" />
+    <Project Path="src/Symphony.Infrastructure.Persistence.Sqlite/Symphony.Infrastructure.Persistence.Sqlite.csproj" />
+    <Project Path="src/Symphony.Infrastructure.Tracker.GitHub/Symphony.Infrastructure.Tracker.GitHub.csproj" />
+    <Project Path="src/Symphony.Infrastructure.Workflows/Symphony.Infrastructure.Workflows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Symphony.Core.Tests/Symphony.Core.Tests.csproj" />
+    <Project Path="tests/Symphony.Integration.Tests/Symphony.Integration.Tests.csproj" />
+  </Folder>
+</Solution>

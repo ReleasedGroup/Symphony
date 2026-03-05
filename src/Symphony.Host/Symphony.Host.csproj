@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Symphony.Core\Symphony.Core.csproj" />
+    <ProjectReference Include="..\Symphony.Infrastructure.Persistence.Sqlite\Symphony.Infrastructure.Persistence.Sqlite.csproj" />
+    <ProjectReference Include="..\Symphony.Infrastructure.Tracker.GitHub\Symphony.Infrastructure.Tracker.GitHub.csproj" />
+    <ProjectReference Include="..\Symphony.Infrastructure.Agent.Codex\Symphony.Infrastructure.Agent.Codex.csproj" />
+    <ProjectReference Include="..\Symphony.Infrastructure.Workflows\Symphony.Infrastructure.Workflows.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.0" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>
