@@ -19,6 +19,10 @@ agent:
 codex:
   command: codex app-server
   timeout_ms: 3600000
+  approval_policy: never
+  thread_sandbox: danger-full-access
+  turn_sandbox_policy: danger-full-access
+  read_timeout_ms: 5000
 workspace:
   root: ./workspaces
   shared_clone_path: ./workspaces/repo

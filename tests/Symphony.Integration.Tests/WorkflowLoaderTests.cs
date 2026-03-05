@@ -46,6 +46,10 @@ public sealed class WorkflowLoaderTests
         Assert.Equal("main", definition.Runtime.Workspace.BaseBranch);
         Assert.Equal("codex app-server", definition.Runtime.Codex.Command);
         Assert.Equal(3_600_000, definition.Runtime.Codex.TimeoutMs);
+        Assert.Equal("never", definition.Runtime.Codex.ApprovalPolicy);
+        Assert.Equal("danger-full-access", definition.Runtime.Codex.ThreadSandbox);
+        Assert.Equal("danger-full-access", definition.Runtime.Codex.TurnSandboxPolicy);
+        Assert.Equal(5_000, definition.Runtime.Codex.ReadTimeoutMs);
         Assert.Equal("Test prompt body.", definition.PromptTemplate);
 
         File.Delete(workflowPath);
@@ -104,6 +108,10 @@ public sealed class WorkflowLoaderTests
             codex:
               command: codex app-server --verbose
               timeout_ms: 120000
+              approval_policy: never
+              thread_sandbox: workspace-write
+              turn_sandbox_policy: workspace-write
+              read_timeout_ms: 9000
             ---
             Prompt body.
             """);
@@ -113,6 +121,10 @@ public sealed class WorkflowLoaderTests
 
         Assert.Equal("codex app-server --verbose", definition.Runtime.Codex.Command);
         Assert.Equal(120000, definition.Runtime.Codex.TimeoutMs);
+        Assert.Equal("never", definition.Runtime.Codex.ApprovalPolicy);
+        Assert.Equal("workspace-write", definition.Runtime.Codex.ThreadSandbox);
+        Assert.Equal("workspace-write", definition.Runtime.Codex.TurnSandboxPolicy);
+        Assert.Equal(9000, definition.Runtime.Codex.ReadTimeoutMs);
 
         File.Delete(workflowPath);
     }
@@ -137,6 +149,30 @@ public sealed class WorkflowLoaderTests
         var loader = new WorkflowLoader();
         var ex = await Assert.ThrowsAsync<WorkflowLoadException>(() => loader.LoadAsync(workflowPath));
         Assert.Equal("invalid_codex_timeout", ex.Code);
+
+        File.Delete(workflowPath);
+    }
+
+    [Fact]
+    public async Task LoadAsync_ShouldRejectInvalidCodexReadTimeout()
+    {
+        var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+        await File.WriteAllTextAsync(workflowPath, """
+            ---
+            tracker:
+              kind: github
+              api_key: test-token
+              owner: released
+              repo: symphony
+            codex:
+              read_timeout_ms: 0
+            ---
+            Prompt body.
+            """);
+
+        var loader = new WorkflowLoader();
+        var ex = await Assert.ThrowsAsync<WorkflowLoadException>(() => loader.LoadAsync(workflowPath));
+        Assert.Equal("invalid_codex_read_timeout", ex.Code);
 
         File.Delete(workflowPath);
     }

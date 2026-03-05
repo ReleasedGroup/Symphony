@@ -185,6 +185,30 @@ public sealed class WorkflowLoader
             throw new WorkflowLoadException("invalid_codex_timeout", "codex.timeout_ms must be > 0.");
         }
 
+        var codexApprovalPolicy = GetOptionalStringFromOptionalMap(codexMap, "approval_policy") ?? "never";
+        if (string.IsNullOrWhiteSpace(codexApprovalPolicy))
+        {
+            throw new WorkflowLoadException("invalid_codex_approval_policy", "codex.approval_policy must be non-empty.");
+        }
+
+        var codexThreadSandbox = GetOptionalStringFromOptionalMap(codexMap, "thread_sandbox") ?? "danger-full-access";
+        if (string.IsNullOrWhiteSpace(codexThreadSandbox))
+        {
+            throw new WorkflowLoadException("invalid_codex_thread_sandbox", "codex.thread_sandbox must be non-empty.");
+        }
+
+        var codexTurnSandboxPolicy = GetOptionalStringFromOptionalMap(codexMap, "turn_sandbox_policy") ?? "danger-full-access";
+        if (string.IsNullOrWhiteSpace(codexTurnSandboxPolicy))
+        {
+            throw new WorkflowLoadException("invalid_codex_turn_sandbox_policy", "codex.turn_sandbox_policy must be non-empty.");
+        }
+
+        var codexReadTimeoutMs = GetOptionalInt(codexMap, "read_timeout_ms", 5_000);
+        if (codexReadTimeoutMs <= 0)
+        {
+            throw new WorkflowLoadException("invalid_codex_read_timeout", "codex.read_timeout_ms must be > 0.");
+        }
+
         return new WorkflowRuntimeSettings(
             new WorkflowTrackerSettings(
                 kind.ToLowerInvariant(),
@@ -206,7 +230,11 @@ public sealed class WorkflowLoader
                 remoteUrl),
             new WorkflowCodexSettings(
                 codexCommand,
-                codexTimeoutMs));
+                codexTimeoutMs,
+                codexApprovalPolicy,
+                codexThreadSandbox,
+                codexTurnSandboxPolicy,
+                codexReadTimeoutMs));
     }
 
     private static Dictionary<string, object?>? GetOptionalMap(IReadOnlyDictionary<string, object?> source, string key)

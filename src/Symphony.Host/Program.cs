@@ -94,7 +94,11 @@ app.MapGet("/api/v1/runtime", async (
             codex = new
             {
                 definition.Runtime.Codex.Command,
-                definition.Runtime.Codex.TimeoutMs
+                definition.Runtime.Codex.TimeoutMs,
+                definition.Runtime.Codex.ApprovalPolicy,
+                definition.Runtime.Codex.ThreadSandbox,
+                definition.Runtime.Codex.TurnSandboxPolicy,
+                definition.Runtime.Codex.ReadTimeoutMs
             },
             workspace = new
             {
