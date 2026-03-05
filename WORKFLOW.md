@@ -33,6 +33,7 @@ hooks:
   after_create: null
   before_run: null
   after_run: null
+  # Parsed but not executed yet (cleanup path pending in v1).
   before_remove: null
   timeout_ms: 60000
 ---

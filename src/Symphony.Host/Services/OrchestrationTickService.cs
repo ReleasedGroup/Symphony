@@ -22,6 +22,12 @@ public sealed class OrchestrationTickService(
     public async Task<int?> RunTickAsync(CancellationToken cancellationToken)
     {
         var workflowDefinition = await workflowDefinitionProvider.GetCurrentAsync(cancellationToken);
+        if (!string.IsNullOrWhiteSpace(workflowDefinition.Runtime.Hooks.BeforeRemove))
+        {
+            logger.LogWarning(
+                "hooks.before_remove is configured but cleanup execution is not implemented yet.");
+        }
+
         var instanceId = ResolveInstanceId(orchestrationOptions.Value);
         var leaseName = string.IsNullOrWhiteSpace(orchestrationOptions.Value.LeaseName)
             ? "poll-dispatch"
@@ -349,6 +355,18 @@ public sealed class OrchestrationTickService(
             logger.LogWarning(
                 ex,
                 "{HookName} hook failed for issue {IssueIdentifier}. Ignoring by design.",
+                hookName,
+                issueIdentifier);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "{HookName} hook hit an unexpected error for issue {IssueIdentifier}. Ignoring by design.",
                 hookName,
                 issueIdentifier);
         }

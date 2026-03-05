@@ -110,10 +110,11 @@ app.MapGet("/api/v1/runtime", async (
             },
             hooks = new
             {
-                definition.Runtime.Hooks.AfterCreate,
-                definition.Runtime.Hooks.BeforeRun,
-                definition.Runtime.Hooks.AfterRun,
-                definition.Runtime.Hooks.BeforeRemove,
+                hasAfterCreate = !string.IsNullOrWhiteSpace(definition.Runtime.Hooks.AfterCreate),
+                hasBeforeRun = !string.IsNullOrWhiteSpace(definition.Runtime.Hooks.BeforeRun),
+                hasAfterRun = !string.IsNullOrWhiteSpace(definition.Runtime.Hooks.AfterRun),
+                hasBeforeRemove = !string.IsNullOrWhiteSpace(definition.Runtime.Hooks.BeforeRemove),
+                beforeRemoveSupported = false,
                 definition.Runtime.Hooks.TimeoutMs
             }
         };

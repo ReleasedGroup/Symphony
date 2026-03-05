@@ -217,6 +217,43 @@ public sealed class OrchestrationTickServiceTests
         Assert.Equal("agent_succeeded", coordinationStore.ReleaseCalls.Single().ReleaseStatus);
     }
 
+    [Fact]
+    public async Task RunTickAsync_ShouldIgnoreUnexpectedAfterRunHookFailure()
+    {
+        var workflow = BuildWorkflowDefinition(
+            maxConcurrentAgents: 1,
+            hooks: new WorkflowHooksSettings(
+                AfterCreate: null,
+                BeforeRun: "echo before-run",
+                AfterRun: "echo after-run",
+                BeforeRemove: null,
+                TimeoutMs: 60_000));
+        var tracker = new FakeTrackerClient(
+        [
+            BuildIssue("issue-1", "#1", priority: 1, createdAt: DateTimeOffset.UtcNow)
+        ]);
+        var coordinationStore = new FakeCoordinationStore(leaseGranted: true);
+        var workspaceManager = new FakeWorkspaceManager(createdNow: true);
+        var hookRunner = new FakeWorkspaceHookRunner(
+            unexpectedFailingHooks: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "after_run" });
+        var agentRunner = new FakeAgentRunner();
+
+        var service = CreateService(
+            workflow,
+            tracker,
+            coordinationStore,
+            workspaceManager,
+            hookRunner,
+            agentRunner);
+
+        var interval = await service.RunTickAsync(CancellationToken.None);
+
+        Assert.Equal(workflow.Runtime.Polling.IntervalMs, interval);
+        Assert.Equal(["before_run", "after_run"], hookRunner.ExecutedHooks);
+        Assert.Equal(["issue-1"], agentRunner.RunIssueIds);
+        Assert.Equal("agent_succeeded", coordinationStore.ReleaseCalls.Single().ReleaseStatus);
+    }
+
     private static OrchestrationTickService CreateService(
         WorkflowDefinition workflowDefinition,
         FakeTrackerClient tracker,
@@ -386,17 +423,27 @@ public sealed class OrchestrationTickServiceTests
         }
     }
 
-    private sealed class FakeWorkspaceHookRunner(IReadOnlySet<string>? failingHooks = null) : IWorkspaceHookRunner
+    private sealed class FakeWorkspaceHookRunner(
+        IReadOnlySet<string>? failingHooks = null,
+        IReadOnlySet<string>? unexpectedFailingHooks = null) : IWorkspaceHookRunner
     {
         private readonly HashSet<string> _failingHooks = failingHooks is null
             ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             : new HashSet<string>(failingHooks, StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _unexpectedFailingHooks = unexpectedFailingHooks is null
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(unexpectedFailingHooks, StringComparer.OrdinalIgnoreCase);
 
         public List<string> ExecutedHooks { get; } = [];
 
         public Task RunHookAsync(WorkspaceHookRequest request, CancellationToken cancellationToken = default)
         {
             ExecutedHooks.Add(request.HookName);
+            if (_unexpectedFailingHooks.Contains(request.HookName))
+            {
+                throw new InvalidOperationException($"{request.HookName} unexpected failure");
+            }
+
             if (_failingHooks.Contains(request.HookName))
             {
                 throw new WorkspaceHookExecutionException(request.HookName, $"{request.HookName} failed");
