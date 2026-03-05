@@ -6,6 +6,7 @@
     <Project Path="src/Symphony.Infrastructure.Persistence.Sqlite/Symphony.Infrastructure.Persistence.Sqlite.csproj" />
     <Project Path="src/Symphony.Infrastructure.Tracker.GitHub/Symphony.Infrastructure.Tracker.GitHub.csproj" />
     <Project Path="src/Symphony.Infrastructure.Workflows/Symphony.Infrastructure.Workflows.csproj" />
+    <Project Path="src/Symphony.Infrastructure.Workspaces/Symphony.Infrastructure.Workspaces.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Symphony.Core.Tests/Symphony.Core.Tests.csproj" />

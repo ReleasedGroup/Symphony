@@ -6,6 +6,7 @@ using Symphony.Host.Workers;
 using Symphony.Infrastructure.Persistence.Sqlite;
 using Symphony.Infrastructure.Persistence.Sqlite.Storage;
 using Symphony.Infrastructure.Tracker.GitHub;
+using Symphony.Infrastructure.Workspaces;
 using Symphony.Infrastructure.Workflows;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -34,6 +35,7 @@ builder.Services
 builder.Services.AddSymphonySqlitePersistence(builder.Configuration);
 builder.Services.AddSymphonyWorkflowServices(builder.Configuration);
 builder.Services.AddSymphonyGitHubTrackerClient();
+builder.Services.AddSymphonyWorkspaceServices();
 builder.Services.AddScoped<OrchestrationTickService>();
 
 builder.Services
@@ -86,6 +88,14 @@ app.MapGet("/api/v1/runtime", async (
             agent = new
             {
                 definition.Runtime.Agent.MaxConcurrentAgents
+            },
+            workspace = new
+            {
+                definition.Runtime.Workspace.Root,
+                definition.Runtime.Workspace.SharedClonePath,
+                definition.Runtime.Workspace.WorktreesRoot,
+                definition.Runtime.Workspace.BaseBranch,
+                definition.Runtime.Workspace.RemoteUrl
             }
         };
     }

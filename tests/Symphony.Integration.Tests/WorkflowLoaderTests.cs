@@ -40,6 +40,10 @@ public sealed class WorkflowLoaderTests
         Assert.Equal("symphony", definition.Runtime.Tracker.Repo);
         Assert.Equal(120000, definition.Runtime.Polling.IntervalMs);
         Assert.Equal(3, definition.Runtime.Agent.MaxConcurrentAgents);
+        Assert.Equal("./workspaces", definition.Runtime.Workspace.Root);
+        Assert.Equal("./workspaces/repo", definition.Runtime.Workspace.SharedClonePath);
+        Assert.Equal("./workspaces/worktrees", definition.Runtime.Workspace.WorktreesRoot);
+        Assert.Equal("main", definition.Runtime.Workspace.BaseBranch);
         Assert.Equal("Test prompt body.", definition.PromptTemplate);
 
         File.Delete(workflowPath);

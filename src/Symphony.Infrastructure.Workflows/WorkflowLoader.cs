@@ -160,6 +160,18 @@ public sealed class WorkflowLoader
             throw new WorkflowLoadException("invalid_max_concurrent_agents", "agent.max_concurrent_agents must be > 0.");
         }
 
+        var workspaceMap = GetOptionalMap(config, "workspace");
+        var workspaceRoot = GetOptionalStringFromOptionalMap(workspaceMap, "root") ?? "./workspaces";
+        var sharedClonePath = GetOptionalStringFromOptionalMap(workspaceMap, "shared_clone_path") ?? "./workspaces/repo";
+        var worktreesRoot = GetOptionalStringFromOptionalMap(workspaceMap, "worktrees_root") ?? "./workspaces/worktrees";
+        var baseBranch = GetOptionalStringFromOptionalMap(workspaceMap, "base_branch") ?? "main";
+        var remoteUrl = GetOptionalStringFromOptionalMap(workspaceMap, "remote_url");
+
+        if (string.IsNullOrWhiteSpace(baseBranch))
+        {
+            throw new WorkflowLoadException("invalid_workspace_base_branch", "workspace.base_branch must be non-empty.");
+        }
+
         return new WorkflowRuntimeSettings(
             new WorkflowTrackerSettings(
                 kind.ToLowerInvariant(),
@@ -172,7 +184,13 @@ public sealed class WorkflowLoader
                 activeStates,
                 terminalStates),
             new WorkflowPollingSettings(intervalMs),
-            new WorkflowAgentSettings(maxConcurrentAgents));
+            new WorkflowAgentSettings(maxConcurrentAgents),
+            new WorkflowWorkspaceSettings(
+                workspaceRoot,
+                sharedClonePath,
+                worktreesRoot,
+                baseBranch,
+                remoteUrl));
     }
 
     private static Dictionary<string, object?>? GetOptionalMap(IReadOnlyDictionary<string, object?> source, string key)
@@ -213,6 +231,16 @@ public sealed class WorkflowLoader
             string str => str.Trim(),
             _ => throw new WorkflowLoadException("workflow_parse_error", $"'{key}' must be a string.")
         };
+    }
+
+    private static string? GetOptionalStringFromOptionalMap(Dictionary<string, object?>? source, string key)
+    {
+        if (source is null)
+        {
+            return null;
+        }
+
+        return GetOptionalString(source, key);
     }
 
     private static string? GetOptionalStringOrNumber(Dictionary<string, object?> source, string key)

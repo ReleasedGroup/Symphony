@@ -11,6 +11,7 @@ public sealed class OrchestrationTickService(
     IWorkflowDefinitionProvider workflowDefinitionProvider,
     IGitHubTrackerClient trackerClient,
     IOrchestrationCoordinationStore coordinationStore,
+    IWorkspaceManager workspaceManager,
     IOptions<OrchestrationOptions> orchestrationOptions,
     ILogger<OrchestrationTickService> logger)
 {
@@ -79,18 +80,43 @@ public sealed class OrchestrationTickService(
 
             try
             {
-                // Dispatch hook placeholder until agent execution is wired.
+                var remoteUrl = ResolveRemoteUrl(
+                    workflowDefinition.Runtime.Workspace.RemoteUrl,
+                    workflowDefinition.Runtime.Tracker.Owner,
+                    workflowDefinition.Runtime.Tracker.Repo);
+
+                var workspace = await workspaceManager.PrepareIssueWorkspaceAsync(
+                    new WorkspacePreparationRequest(
+                        IssueId: issue.Id,
+                        IssueIdentifier: issue.Identifier,
+                        SuggestedBranchName: issue.BranchName,
+                        WorkspaceRoot: workflowDefinition.Runtime.Workspace.Root,
+                        SharedClonePath: workflowDefinition.Runtime.Workspace.SharedClonePath,
+                        WorktreesRoot: workflowDefinition.Runtime.Workspace.WorktreesRoot,
+                        BaseBranch: workflowDefinition.Runtime.Workspace.BaseBranch,
+                        RemoteRepositoryUrl: remoteUrl),
+                    cancellationToken);
+
                 logger.LogInformation(
-                    "Claimed issue {IssueIdentifier} ({IssueId}) for dispatch placeholder.",
+                    "Prepared workspace {WorkspacePath} for issue {IssueIdentifier} ({IssueId}) on branch {BranchName}.",
+                    workspace.WorkspacePath,
                     issue.Identifier,
-                    issue.Id);
-            }
-            finally
-            {
+                    issue.Id,
+                    workspace.BranchName);
+
                 await coordinationStore.ReleaseIssueClaimAsync(
                     issue.Id,
                     instanceId,
-                    "released",
+                    "workspace_prepared",
+                    cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed preparing workspace for issue {IssueIdentifier} ({IssueId}).", issue.Identifier, issue.Id);
+                await coordinationStore.ReleaseIssueClaimAsync(
+                    issue.Id,
+                    instanceId,
+                    "workspace_failed",
                     cancellationToken);
             }
         }
@@ -127,5 +153,15 @@ public sealed class OrchestrationTickService(
         }
 
         return Environment.GetEnvironmentVariable(variableName);
+    }
+
+    private static string ResolveRemoteUrl(string? configuredRemoteUrl, string owner, string repo)
+    {
+        if (!string.IsNullOrWhiteSpace(configuredRemoteUrl))
+        {
+            return configuredRemoteUrl;
+        }
+
+        return $"https://github.com/{owner}/{repo}.git";
     }
 }

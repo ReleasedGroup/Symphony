@@ -3,7 +3,8 @@ namespace Symphony.Infrastructure.Workflows.Models;
 public sealed record WorkflowRuntimeSettings(
     WorkflowTrackerSettings Tracker,
     WorkflowPollingSettings Polling,
-    WorkflowAgentSettings Agent);
+    WorkflowAgentSettings Agent,
+    WorkflowWorkspaceSettings Workspace);
 
 public sealed record WorkflowTrackerSettings(
     string Kind,
@@ -19,3 +20,10 @@ public sealed record WorkflowTrackerSettings(
 public sealed record WorkflowPollingSettings(int IntervalMs);
 
 public sealed record WorkflowAgentSettings(int MaxConcurrentAgents);
+
+public sealed record WorkflowWorkspaceSettings(
+    string Root,
+    string SharedClonePath,
+    string WorktreesRoot,
+    string BaseBranch,
+    string? RemoteUrl);
