@@ -31,9 +31,13 @@ public sealed class SymphonyDbContext(DbContextOptions<SymphonyDbContext> option
             entity.Property(x => x.ClaimedByInstanceId).HasMaxLength(200).IsRequired();
             entity.Property(x => x.Status).HasMaxLength(50).IsRequired();
             entity.Property(x => x.ClaimedAtUtc).IsRequired();
+            entity.Property(x => x.ReleasedAtUtc);
             entity.HasIndex(x => x.IssueId);
             entity.HasIndex(x => x.Status);
             entity.HasIndex(x => new { x.IssueId, x.Status });
+            entity.HasIndex(x => x.IssueId)
+                .IsUnique()
+                .HasFilter("Status = 'active'");
         });
     }
 }

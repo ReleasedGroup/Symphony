@@ -22,6 +22,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Symphony.Host\Symphony.Host.csproj" />
     <ProjectReference Include="..\..\src\Symphony.Infrastructure.Persistence.Sqlite\Symphony.Infrastructure.Persistence.Sqlite.csproj" />
+    <ProjectReference Include="..\..\src\Symphony.Infrastructure.Tracker.GitHub\Symphony.Infrastructure.Tracker.GitHub.csproj" />
+    <ProjectReference Include="..\..\src\Symphony.Infrastructure.Workflows\Symphony.Infrastructure.Workflows.csproj" />
   </ItemGroup>
 
 </Project>

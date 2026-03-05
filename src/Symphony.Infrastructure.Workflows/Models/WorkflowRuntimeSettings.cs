@@ -1,0 +1,21 @@
+namespace Symphony.Infrastructure.Workflows.Models;
+
+public sealed record WorkflowRuntimeSettings(
+    WorkflowTrackerSettings Tracker,
+    WorkflowPollingSettings Polling,
+    WorkflowAgentSettings Agent);
+
+public sealed record WorkflowTrackerSettings(
+    string Kind,
+    string Endpoint,
+    string ApiKey,
+    string Owner,
+    string Repo,
+    string? Milestone,
+    IReadOnlyList<string> Labels,
+    IReadOnlyList<string> ActiveStates,
+    IReadOnlyList<string> TerminalStates);
+
+public sealed record WorkflowPollingSettings(int IntervalMs);
+
+public sealed record WorkflowAgentSettings(int MaxConcurrentAgents);
