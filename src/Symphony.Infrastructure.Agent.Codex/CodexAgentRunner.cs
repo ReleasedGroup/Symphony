@@ -9,18 +9,21 @@ namespace Symphony.Infrastructure.Agent.Codex;
 
 public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentRunner
 {
+    private const int MaxCapturedOutputChars = 256_000;
+    private const int KillGracePeriodMs = 10_000;
+
     public async Task<AgentRunResult> RunIssueAsync(
         AgentRunRequest request,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(request.Command))
         {
-            throw new ArgumentException("Command must be non-empty.", nameof(request));
+            throw new ArgumentException("Command must be non-empty.", nameof(request.Command));
         }
 
         if (string.IsNullOrWhiteSpace(request.WorkspacePath))
         {
-            throw new ArgumentException("WorkspacePath must be non-empty.", nameof(request));
+            throw new ArgumentException("WorkspacePath must be non-empty.", nameof(request.WorkspacePath));
         }
 
         if (!Directory.Exists(request.WorkspacePath))
@@ -30,13 +33,13 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
 
         if (request.TimeoutMs <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(request), "TimeoutMs must be > 0.");
+            throw new ArgumentOutOfRangeException(nameof(request.TimeoutMs), "TimeoutMs must be > 0.");
         }
 
         var startInfo = BuildProcessStartInfo(request.Command, request.WorkspacePath);
         using var process = new Process { StartInfo = startInfo };
-        var stdoutBuffer = new StringBuilder();
-        var stderrBuffer = new StringBuilder();
+        var stdoutBuffer = new BoundedOutputBuffer(MaxCapturedOutputChars, "stdout");
+        var stderrBuffer = new BoundedOutputBuffer(MaxCapturedOutputChars, "stderr");
 
         process.OutputDataReceived += (_, args) =>
         {
@@ -88,6 +91,8 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         timeoutCts.CancelAfter(request.TimeoutMs);
 
         var timedOut = false;
+        var killError = string.Empty;
+        var exitedAfterKillAttempt = true;
         try
         {
             await process.WaitForExitAsync(timeoutCts.Token);
@@ -95,20 +100,41 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             timedOut = true;
-            TryKillProcess(process);
-            await process.WaitForExitAsync(CancellationToken.None);
+
+            if (!TryKillProcess(process, out killError))
+            {
+                logger.LogWarning(
+                    "Failed to terminate timed-out process for issue {IssueIdentifier}. Error: {Error}",
+                    request.IssueIdentifier,
+                    killError);
+            }
+
+            if (!process.HasExited)
+            {
+                exitedAfterKillAttempt = await WaitForExitWithGracePeriodAsync(process, KillGracePeriodMs);
+                if (!exitedAfterKillAttempt)
+                {
+                    logger.LogWarning(
+                        "Timed-out process for issue {IssueIdentifier} did not exit within kill grace period ({KillGracePeriodMs}ms).",
+                        request.IssueIdentifier,
+                        KillGracePeriodMs);
+                }
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            TryKillProcess(process);
+            TryKillProcess(process, out _);
             throw;
         }
 
         startedAt.Stop();
-        process.WaitForExit();
+        if (process.HasExited)
+        {
+            process.WaitForExit();
+        }
 
-        var stdout = stdoutBuffer.ToString().TrimEnd();
-        var stderr = stderrBuffer.ToString().TrimEnd();
+        var stdout = stdoutBuffer.ToText();
+        var stderr = stderrBuffer.ToText();
 
         if (timedOut)
         {
@@ -124,6 +150,16 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
             else
             {
                 stderr = $"{stderr}{Environment.NewLine}Command timed out after {request.TimeoutMs}ms.";
+            }
+
+            if (!exitedAfterKillAttempt)
+            {
+                stderr = $"{stderr}{Environment.NewLine}Process did not exit within kill grace period ({KillGracePeriodMs}ms).";
+            }
+
+            if (!string.IsNullOrWhiteSpace(killError))
+            {
+                stderr = $"{stderr}{Environment.NewLine}Kill error: {killError}";
             }
 
             return new AgentRunResult(
@@ -171,18 +207,97 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         return startInfo;
     }
 
-    private static void TryKillProcess(Process process)
+    private static bool TryKillProcess(Process process, out string error)
     {
+        error = string.Empty;
+
         try
         {
             if (!process.HasExited)
             {
                 process.Kill(entireProcessTree: true);
             }
+
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
-            // Best-effort cleanup only.
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private static async Task<bool> WaitForExitWithGracePeriodAsync(Process process, int gracePeriodMs)
+    {
+        using var graceCts = new CancellationTokenSource(gracePeriodMs);
+        try
+        {
+            await process.WaitForExitAsync(graceCts.Token);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return process.HasExited;
+        }
+    }
+
+    private sealed class BoundedOutputBuffer(int maxChars, string streamName)
+    {
+        private readonly object _sync = new();
+        private readonly StringBuilder _builder = new();
+        private bool _truncated;
+
+        public void AppendLine(string line)
+        {
+            lock (_sync)
+            {
+                if (_truncated)
+                {
+                    return;
+                }
+
+                var remaining = maxChars - _builder.Length;
+                if (remaining <= 0)
+                {
+                    _truncated = true;
+                    return;
+                }
+
+                if (line.Length + Environment.NewLine.Length <= remaining)
+                {
+                    _builder.AppendLine(line);
+                    return;
+                }
+
+                var charsToCopy = Math.Max(remaining - Environment.NewLine.Length, 0);
+                if (charsToCopy > 0)
+                {
+                    _builder.Append(line.AsSpan(0, Math.Min(charsToCopy, line.Length)));
+                    _builder.AppendLine();
+                }
+
+                _truncated = true;
+            }
+        }
+
+        public string ToText()
+        {
+            lock (_sync)
+            {
+                var text = _builder.ToString().TrimEnd();
+                if (!_truncated)
+                {
+                    return text;
+                }
+
+                var suffix = $"[{streamName} truncated at {maxChars} chars]";
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    return suffix;
+                }
+
+                return $"{text}{Environment.NewLine}{suffix}";
+            }
         }
     }
 }
