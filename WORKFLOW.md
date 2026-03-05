@@ -16,6 +16,12 @@ polling:
   interval_ms: 600000
 agent:
   max_concurrent_agents: 5
+workspace:
+  root: ./workspaces
+  shared_clone_path: ./workspaces/repo
+  worktrees_root: ./workspaces/worktrees
+  base_branch: main
+  remote_url: null
 ---
 
 You are working on a GitHub issue for this repository.
