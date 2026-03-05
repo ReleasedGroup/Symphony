@@ -12,4 +12,9 @@ public interface IGitHubTrackerClient
         TrackerQuery query,
         IReadOnlyList<string> states,
         CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<IssueStateSnapshot>> FetchIssueStatesByIdsAsync(
+        TrackerQuery query,
+        IReadOnlyList<string> issueIds,
+        CancellationToken cancellationToken = default);
 }
