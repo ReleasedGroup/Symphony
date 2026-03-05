@@ -51,7 +51,11 @@ public sealed class WorkflowPromptRendererTests
                 RemoteUrl: null),
             new WorkflowCodexSettings(
                 Command: "codex app-server",
-                TimeoutMs: 3600000));
+                TimeoutMs: 3600000,
+                ApprovalPolicy: "never",
+                ThreadSandbox: "danger-full-access",
+                TurnSandboxPolicy: "danger-full-access",
+                ReadTimeoutMs: 5000));
 
         return new WorkflowDefinition(
             Config: new Dictionary<string, object?>(),

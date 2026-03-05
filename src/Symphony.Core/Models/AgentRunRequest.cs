@@ -6,4 +6,8 @@ public sealed record AgentRunRequest(
     string WorkspacePath,
     string Prompt,
     string Command,
-    int TimeoutMs);
+    int TimeoutMs,
+    string ApprovalPolicy,
+    string ThreadSandbox,
+    string TurnSandboxPolicy,
+    int ReadTimeoutMs);

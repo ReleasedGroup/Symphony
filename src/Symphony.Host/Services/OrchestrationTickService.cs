@@ -109,7 +109,11 @@ public sealed class OrchestrationTickService(
                         workspace.WorkspacePath,
                         prompt,
                         workflowDefinition.Runtime.Codex.Command,
-                        workflowDefinition.Runtime.Codex.TimeoutMs),
+                        workflowDefinition.Runtime.Codex.TimeoutMs,
+                        workflowDefinition.Runtime.Codex.ApprovalPolicy,
+                        workflowDefinition.Runtime.Codex.ThreadSandbox,
+                        workflowDefinition.Runtime.Codex.TurnSandboxPolicy,
+                        workflowDefinition.Runtime.Codex.ReadTimeoutMs),
                     cancellationToken);
 
                 logger.LogInformation(

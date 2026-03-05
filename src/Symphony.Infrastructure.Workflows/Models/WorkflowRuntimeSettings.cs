@@ -31,4 +31,8 @@ public sealed record WorkflowWorkspaceSettings(
 
 public sealed record WorkflowCodexSettings(
     string Command,
-    int TimeoutMs);
+    int TimeoutMs,
+    string ApprovalPolicy,
+    string ThreadSandbox,
+    string TurnSandboxPolicy,
+    int ReadTimeoutMs);
