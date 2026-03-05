@@ -5,6 +5,7 @@ public sealed record WorkflowRuntimeSettings(
     WorkflowPollingSettings Polling,
     WorkflowAgentSettings Agent,
     WorkflowWorkspaceSettings Workspace,
+    WorkflowHooksSettings Hooks,
     WorkflowCodexSettings Codex);
 
 public sealed record WorkflowTrackerSettings(
@@ -28,6 +29,13 @@ public sealed record WorkflowWorkspaceSettings(
     string WorktreesRoot,
     string BaseBranch,
     string? RemoteUrl);
+
+public sealed record WorkflowHooksSettings(
+    string? AfterCreate,
+    string? BeforeRun,
+    string? AfterRun,
+    string? BeforeRemove,
+    int TimeoutMs);
 
 public sealed record WorkflowCodexSettings(
     string Command,

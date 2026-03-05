@@ -14,6 +14,7 @@ public sealed class OrchestrationTickService(
     IGitHubTrackerClient trackerClient,
     IOrchestrationCoordinationStore coordinationStore,
     IWorkspaceManager workspaceManager,
+    IWorkspaceHookRunner workspaceHookRunner,
     IAgentRunner agentRunner,
     IOptions<OrchestrationOptions> orchestrationOptions,
     ILogger<OrchestrationTickService> logger)
@@ -21,6 +22,12 @@ public sealed class OrchestrationTickService(
     public async Task<int?> RunTickAsync(CancellationToken cancellationToken)
     {
         var workflowDefinition = await workflowDefinitionProvider.GetCurrentAsync(cancellationToken);
+        if (!string.IsNullOrWhiteSpace(workflowDefinition.Runtime.Hooks.BeforeRemove))
+        {
+            logger.LogWarning(
+                "hooks.before_remove is configured but cleanup execution is not implemented yet.");
+        }
+
         var instanceId = ResolveInstanceId(orchestrationOptions.Value);
         var leaseName = string.IsNullOrWhiteSpace(orchestrationOptions.Value.LeaseName)
             ? "poll-dispatch"
@@ -119,27 +126,60 @@ public sealed class OrchestrationTickService(
                         RemoteRepositoryUrl: remoteUrl),
                     cancellationToken);
 
-                var prompt = workflowPromptRenderer.RenderForIssue(workflowDefinition, issue);
-                var runResult = await agentRunner.RunIssueAsync(
-                    new AgentRunRequest(
-                        issue.Id,
-                        issue.Identifier,
-                        workspace.WorkspacePath,
-                        prompt,
-                        workflowDefinition.Runtime.Codex.Command,
-                        workflowDefinition.Runtime.Codex.TimeoutMs,
-                        workflowDefinition.Runtime.Codex.ApprovalPolicy,
-                        workflowDefinition.Runtime.Codex.ThreadSandbox,
-                        workflowDefinition.Runtime.Codex.TurnSandboxPolicy,
-                        workflowDefinition.Runtime.Codex.ReadTimeoutMs),
-                    cancellationToken);
-
                 logger.LogInformation(
                     "Workspace {WorkspacePath} prepared for issue {IssueIdentifier} ({IssueId}) on branch {BranchName}.",
                     workspace.WorkspacePath,
                     issue.Identifier,
                     issue.Id,
                     workspace.BranchName);
+
+                if (workspace.CreatedNow)
+                {
+                    await RunRequiredHookAsync(
+                        hookName: "after_create",
+                        hookScript: workflowDefinition.Runtime.Hooks.AfterCreate,
+                        issueIdentifier: issue.Identifier,
+                        workspacePath: workspace.WorkspacePath,
+                        timeoutMs: workflowDefinition.Runtime.Hooks.TimeoutMs,
+                        cancellationToken);
+                }
+
+                await RunRequiredHookAsync(
+                    hookName: "before_run",
+                    hookScript: workflowDefinition.Runtime.Hooks.BeforeRun,
+                    issueIdentifier: issue.Identifier,
+                    workspacePath: workspace.WorkspacePath,
+                    timeoutMs: workflowDefinition.Runtime.Hooks.TimeoutMs,
+                    cancellationToken);
+
+                AgentRunResult runResult;
+                try
+                {
+                    var prompt = workflowPromptRenderer.RenderForIssue(workflowDefinition, issue);
+                    runResult = await agentRunner.RunIssueAsync(
+                        new AgentRunRequest(
+                            issue.Id,
+                            issue.Identifier,
+                            workspace.WorkspacePath,
+                            prompt,
+                            workflowDefinition.Runtime.Codex.Command,
+                            workflowDefinition.Runtime.Codex.TimeoutMs,
+                            workflowDefinition.Runtime.Codex.ApprovalPolicy,
+                            workflowDefinition.Runtime.Codex.ThreadSandbox,
+                            workflowDefinition.Runtime.Codex.TurnSandboxPolicy,
+                            workflowDefinition.Runtime.Codex.ReadTimeoutMs),
+                        cancellationToken);
+                }
+                finally
+                {
+                    await RunBestEffortHookAsync(
+                        hookName: "after_run",
+                        hookScript: workflowDefinition.Runtime.Hooks.AfterRun,
+                        issueIdentifier: issue.Identifier,
+                        workspacePath: workspace.WorkspacePath,
+                        timeoutMs: workflowDefinition.Runtime.Hooks.TimeoutMs,
+                        cancellationToken);
+                }
 
                 if (runResult.Success)
                 {
@@ -170,6 +210,24 @@ public sealed class OrchestrationTickService(
                     issue.Identifier,
                     issue.Id,
                     ex.Code);
+            }
+            catch (WorkspaceHookExecutionException ex) when (string.Equals(ex.HookName, "after_create", StringComparison.OrdinalIgnoreCase))
+            {
+                releaseStatus = "after_create_failed";
+                logger.LogError(
+                    ex,
+                    "after_create hook failed for issue {IssueIdentifier} ({IssueId}).",
+                    issue.Identifier,
+                    issue.Id);
+            }
+            catch (WorkspaceHookExecutionException ex) when (string.Equals(ex.HookName, "before_run", StringComparison.OrdinalIgnoreCase))
+            {
+                releaseStatus = "before_run_failed";
+                logger.LogError(
+                    ex,
+                    "before_run hook failed for issue {IssueIdentifier} ({IssueId}).",
+                    issue.Identifier,
+                    issue.Id);
             }
             catch (Exception ex)
             {
@@ -243,6 +301,75 @@ public sealed class OrchestrationTickService(
         }
 
         return $"{value[..maxLength]}...";
+    }
+
+    private async Task RunRequiredHookAsync(
+        string hookName,
+        string? hookScript,
+        string issueIdentifier,
+        string workspacePath,
+        int timeoutMs,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(hookScript))
+        {
+            return;
+        }
+
+        await workspaceHookRunner.RunHookAsync(
+            new WorkspaceHookRequest(
+                HookName: hookName,
+                Script: hookScript,
+                WorkspacePath: workspacePath,
+                TimeoutMs: timeoutMs,
+                IssueIdentifier: issueIdentifier),
+            cancellationToken);
+    }
+
+    private async Task RunBestEffortHookAsync(
+        string hookName,
+        string? hookScript,
+        string issueIdentifier,
+        string workspacePath,
+        int timeoutMs,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(hookScript))
+        {
+            return;
+        }
+
+        try
+        {
+            await workspaceHookRunner.RunHookAsync(
+                new WorkspaceHookRequest(
+                    HookName: hookName,
+                    Script: hookScript,
+                    WorkspacePath: workspacePath,
+                    TimeoutMs: timeoutMs,
+                    IssueIdentifier: issueIdentifier),
+                cancellationToken);
+        }
+        catch (WorkspaceHookExecutionException ex)
+        {
+            logger.LogWarning(
+                ex,
+                "{HookName} hook failed for issue {IssueIdentifier}. Ignoring by design.",
+                hookName,
+                issueIdentifier);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "{HookName} hook hit an unexpected error for issue {IssueIdentifier}. Ignoring by design.",
+                hookName,
+                issueIdentifier);
+        }
     }
 
     private static IEnumerable<NormalizedIssue> OrderIssuesForDispatch(IEnumerable<NormalizedIssue> issues)
