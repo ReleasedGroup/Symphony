@@ -4,14 +4,17 @@ using Symphony.Core.Configuration;
 using Symphony.Core.Models;
 using Symphony.Infrastructure.Tracker.GitHub;
 using Symphony.Infrastructure.Workflows;
+using Symphony.Infrastructure.Workflows.Models;
 
 namespace Symphony.Host.Services;
 
 public sealed class OrchestrationTickService(
     IWorkflowDefinitionProvider workflowDefinitionProvider,
+    IWorkflowPromptRenderer workflowPromptRenderer,
     IGitHubTrackerClient trackerClient,
     IOrchestrationCoordinationStore coordinationStore,
     IWorkspaceManager workspaceManager,
+    IAgentRunner agentRunner,
     IOptions<OrchestrationOptions> orchestrationOptions,
     ILogger<OrchestrationTickService> logger)
 {
@@ -78,6 +81,7 @@ public sealed class OrchestrationTickService(
                 continue;
             }
 
+            var releaseStatus = "agent_failed";
             try
             {
                 var remoteUrl = ResolveRemoteUrl(
@@ -97,26 +101,65 @@ public sealed class OrchestrationTickService(
                         RemoteRepositoryUrl: remoteUrl),
                     cancellationToken);
 
+                var prompt = workflowPromptRenderer.RenderForIssue(workflowDefinition, issue);
+                var runResult = await agentRunner.RunIssueAsync(
+                    new AgentRunRequest(
+                        issue.Id,
+                        issue.Identifier,
+                        workspace.WorkspacePath,
+                        prompt,
+                        workflowDefinition.Runtime.Codex.Command,
+                        workflowDefinition.Runtime.Codex.TimeoutMs),
+                    cancellationToken);
+
                 logger.LogInformation(
-                    "Prepared workspace {WorkspacePath} for issue {IssueIdentifier} ({IssueId}) on branch {BranchName}.",
+                    "Workspace {WorkspacePath} prepared for issue {IssueIdentifier} ({IssueId}) on branch {BranchName}.",
                     workspace.WorkspacePath,
                     issue.Identifier,
                     issue.Id,
                     workspace.BranchName);
 
-                await coordinationStore.ReleaseIssueClaimAsync(
+                if (runResult.Success)
+                {
+                    releaseStatus = "agent_succeeded";
+                    logger.LogInformation(
+                        "Agent run succeeded for issue {IssueIdentifier} with exit code {ExitCode} in {DurationMs}ms.",
+                        issue.Identifier,
+                        runResult.ExitCode,
+                        (int)runResult.Duration.TotalMilliseconds);
+                }
+                else
+                {
+                    releaseStatus = "agent_failed";
+                    logger.LogWarning(
+                        "Agent run failed for issue {IssueIdentifier} with exit code {ExitCode} in {DurationMs}ms. StdErr: {StdErr}",
+                        issue.Identifier,
+                        runResult.ExitCode,
+                        (int)runResult.Duration.TotalMilliseconds,
+                        TruncateForLog(runResult.Stderr, 2_000));
+                }
+            }
+            catch (WorkflowLoadException ex)
+            {
+                releaseStatus = "prompt_failed";
+                logger.LogError(
+                    ex,
+                    "Failed rendering prompt for issue {IssueIdentifier} ({IssueId}) with code {Code}.",
+                    issue.Identifier,
                     issue.Id,
-                    instanceId,
-                    "workspace_prepared",
-                    cancellationToken);
+                    ex.Code);
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Failed preparing workspace for issue {IssueIdentifier} ({IssueId}).", issue.Identifier, issue.Id);
+                releaseStatus = "dispatch_failed";
+                logger.LogError(ex, "Failed processing issue {IssueIdentifier} ({IssueId}).", issue.Identifier, issue.Id);
+            }
+            finally
+            {
                 await coordinationStore.ReleaseIssueClaimAsync(
                     issue.Id,
                     instanceId,
-                    "workspace_failed",
+                    releaseStatus,
                     cancellationToken);
             }
         }
@@ -163,5 +206,20 @@ public sealed class OrchestrationTickService(
         }
 
         return $"https://github.com/{owner}/{repo}.git";
+    }
+
+    private static string TruncateForLog(string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        if (value.Length <= maxLength)
+        {
+            return value;
+        }
+
+        return $"{value[..maxLength]}...";
     }
 }
