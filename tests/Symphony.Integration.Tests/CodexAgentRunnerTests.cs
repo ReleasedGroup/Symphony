@@ -86,7 +86,7 @@ public sealed class CodexAgentRunnerTests
             """);
 
         var runner = new CodexAgentRunner(NullLogger<CodexAgentRunner>.Instance);
-        var command = $"{wrapperPath} {scriptPath}";
+        var command = $"call \"{wrapperPath}\" \"{scriptPath}\"";
 
         var result = await runner.RunIssueAsync(CreateRequest("id-4", "#4", workspace.FullName, command, 30_000));
 

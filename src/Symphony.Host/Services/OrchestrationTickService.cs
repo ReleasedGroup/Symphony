@@ -72,9 +72,9 @@ public sealed class OrchestrationTickService(
         if (orderedIssues.Count > maxConcurrentAgents)
         {
             logger.LogInformation(
-                "Dispatch scan limited to {MaxConcurrentAgents} claims from {CandidateCount} ordered candidates.",
-                maxConcurrentAgents,
-                orderedIssues.Count);
+                "Found {CandidateCount} ordered candidates; at most {MaxConcurrentAgents} agents can be dispatched this tick.",
+                orderedIssues.Count,
+                maxConcurrentAgents);
         }
 
         var dispatchCount = 0;

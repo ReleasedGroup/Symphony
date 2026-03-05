@@ -686,10 +686,7 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             startInfo.FileName = "cmd.exe";
-            startInfo.ArgumentList.Add("/d");
-            startInfo.ArgumentList.Add("/s");
-            startInfo.ArgumentList.Add("/c");
-            startInfo.ArgumentList.Add(command);
+            startInfo.Arguments = $"/d /s /c {command}";
             return startInfo;
         }
 
