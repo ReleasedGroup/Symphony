@@ -88,8 +88,12 @@ public sealed class GitHubTrackerClientTests
         Assert.Single(issue.PullRequests);
     }
 
-    [Fact]
-    public async Task FetchIssuesByStatesAsync_ShouldReturnIssuesMatchingRequestedStates()
+    [Theory]
+    [InlineData("Closed")]
+    [InlineData("Done")]
+    [InlineData("Resolved")]
+    [InlineData("Completed")]
+    public async Task FetchIssuesByStatesAsync_ShouldReturnIssuesMatchingRequestedStates(string requestedState)
     {
         const string payload = """
             {
@@ -149,7 +153,7 @@ public sealed class GitHubTrackerClientTests
                 ActiveStates: ["Open"],
                 Labels: ["backend"],
                 Milestone: "Sprint 1"),
-            states: ["Closed"]);
+            states: [requestedState]);
 
         var issue = Assert.Single(issues);
         Assert.Equal("#111", issue.Identifier);

@@ -18,42 +18,49 @@ public sealed class WorkspaceManagerTests
         var sharedClonePath = Path.Combine(workspaceRoot, "repo");
         var worktreesRoot = Path.Combine(workspaceRoot, "worktrees");
 
-        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            Directory.CreateDirectory(tempRoot);
 
-        await RunGitAsync(tempRoot, ["init", "--bare", remoteBare]);
-        await RunGitAsync(tempRoot, ["clone", remoteBare, seedClone]);
-        await RunGitAsync(seedClone, ["config", "user.name", "symfony-tests"]);
-        await RunGitAsync(seedClone, ["config", "user.email", "symphony-tests@example.com"]);
-        await File.WriteAllTextAsync(Path.Combine(seedClone, "README.md"), "seed");
-        await RunGitAsync(seedClone, ["add", "README.md"]);
-        await RunGitAsync(seedClone, ["commit", "-m", "seed"]);
-        await RunGitAsync(seedClone, ["branch", "-M", "main"]);
-        await RunGitAsync(seedClone, ["push", "-u", "origin", "main"]);
+            await RunGitAsync(tempRoot, ["init", "--bare", remoteBare]);
+            await RunGitAsync(tempRoot, ["clone", remoteBare, seedClone]);
+            await RunGitAsync(seedClone, ["config", "user.name", "symfony-tests"]);
+            await RunGitAsync(seedClone, ["config", "user.email", "symphony-tests@example.com"]);
+            await File.WriteAllTextAsync(Path.Combine(seedClone, "README.md"), "seed");
+            await RunGitAsync(seedClone, ["add", "README.md"]);
+            await RunGitAsync(seedClone, ["commit", "-m", "seed"]);
+            await RunGitAsync(seedClone, ["branch", "-M", "main"]);
+            await RunGitAsync(seedClone, ["push", "-u", "origin", "main"]);
 
-        var manager = new GitWorktreeWorkspaceManager(
-            new NoOpWorkspaceHookRunner(),
-            NullLogger<GitWorktreeWorkspaceManager>.Instance);
-        var request = new WorkspacePreparationRequest(
-            IssueId: "I1",
-            IssueIdentifier: "#101",
-            SuggestedBranchName: null,
-            WorkspaceRoot: workspaceRoot,
-            SharedClonePath: sharedClonePath,
-            WorktreesRoot: worktreesRoot,
-            BaseBranch: "main",
-            RemoteRepositoryUrl: remoteBare);
+            var manager = new GitWorktreeWorkspaceManager(
+                new NoOpWorkspaceHookRunner(),
+                NullLogger<GitWorktreeWorkspaceManager>.Instance);
+            var request = new WorkspacePreparationRequest(
+                IssueId: "I1",
+                IssueIdentifier: "#101",
+                SuggestedBranchName: null,
+                WorkspaceRoot: workspaceRoot,
+                SharedClonePath: sharedClonePath,
+                WorktreesRoot: worktreesRoot,
+                BaseBranch: "main",
+                RemoteRepositoryUrl: remoteBare);
 
-        var first = await manager.PrepareIssueWorkspaceAsync(request);
-        Assert.True(first.CreatedNow);
-        Assert.True(Directory.Exists(sharedClonePath));
-        Assert.True(Directory.Exists(first.WorkspacePath));
-        Assert.Equal("symphony/101", first.BranchName);
+            var first = await manager.PrepareIssueWorkspaceAsync(request);
+            Assert.True(first.CreatedNow);
+            Assert.True(Directory.Exists(sharedClonePath));
+            Assert.True(Directory.Exists(first.WorkspacePath));
+            Assert.Equal("symphony/101", first.BranchName);
 
-        var currentBranch = await RunGitAsync(first.WorkspacePath, ["rev-parse", "--abbrev-ref", "HEAD"]);
-        Assert.Equal("symphony/101", currentBranch.Stdout.Trim());
+            var currentBranch = await RunGitAsync(first.WorkspacePath, ["rev-parse", "--abbrev-ref", "HEAD"]);
+            Assert.Equal("symphony/101", currentBranch.Stdout.Trim());
 
-        var second = await manager.PrepareIssueWorkspaceAsync(request);
-        Assert.False(second.CreatedNow);
+            var second = await manager.PrepareIssueWorkspaceAsync(request);
+            Assert.False(second.CreatedNow);
+        }
+        finally
+        {
+            TryDeleteDirectory(tempRoot);
+        }
     }
 
     [Fact]
@@ -66,46 +73,53 @@ public sealed class WorkspaceManagerTests
         var sharedClonePath = Path.Combine(workspaceRoot, "repo");
         var worktreesRoot = Path.Combine(workspaceRoot, "worktrees");
 
-        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            Directory.CreateDirectory(tempRoot);
 
-        await RunGitAsync(tempRoot, ["init", "--bare", remoteBare]);
-        await RunGitAsync(tempRoot, ["clone", remoteBare, seedClone]);
-        await RunGitAsync(seedClone, ["config", "user.name", "symfony-tests"]);
-        await RunGitAsync(seedClone, ["config", "user.email", "symphony-tests@example.com"]);
-        await File.WriteAllTextAsync(Path.Combine(seedClone, "README.md"), "seed");
-        await RunGitAsync(seedClone, ["add", "README.md"]);
-        await RunGitAsync(seedClone, ["commit", "-m", "seed"]);
-        await RunGitAsync(seedClone, ["branch", "-M", "main"]);
-        await RunGitAsync(seedClone, ["push", "-u", "origin", "main"]);
+            await RunGitAsync(tempRoot, ["init", "--bare", remoteBare]);
+            await RunGitAsync(tempRoot, ["clone", remoteBare, seedClone]);
+            await RunGitAsync(seedClone, ["config", "user.name", "symfony-tests"]);
+            await RunGitAsync(seedClone, ["config", "user.email", "symphony-tests@example.com"]);
+            await File.WriteAllTextAsync(Path.Combine(seedClone, "README.md"), "seed");
+            await RunGitAsync(seedClone, ["add", "README.md"]);
+            await RunGitAsync(seedClone, ["commit", "-m", "seed"]);
+            await RunGitAsync(seedClone, ["branch", "-M", "main"]);
+            await RunGitAsync(seedClone, ["push", "-u", "origin", "main"]);
 
-        var hookRunner = new RecordingWorkspaceHookRunner();
-        var manager = new GitWorktreeWorkspaceManager(
-            hookRunner,
-            NullLogger<GitWorktreeWorkspaceManager>.Instance);
+            var hookRunner = new RecordingWorkspaceHookRunner();
+            var manager = new GitWorktreeWorkspaceManager(
+                hookRunner,
+                NullLogger<GitWorktreeWorkspaceManager>.Instance);
 
-        var prepare = await manager.PrepareIssueWorkspaceAsync(new WorkspacePreparationRequest(
-            IssueId: "I1",
-            IssueIdentifier: "#101",
-            SuggestedBranchName: null,
-            WorkspaceRoot: workspaceRoot,
-            SharedClonePath: sharedClonePath,
-            WorktreesRoot: worktreesRoot,
-            BaseBranch: "main",
-            RemoteRepositoryUrl: remoteBare));
+            var prepare = await manager.PrepareIssueWorkspaceAsync(new WorkspacePreparationRequest(
+                IssueId: "I1",
+                IssueIdentifier: "#101",
+                SuggestedBranchName: null,
+                WorkspaceRoot: workspaceRoot,
+                SharedClonePath: sharedClonePath,
+                WorktreesRoot: worktreesRoot,
+                BaseBranch: "main",
+                RemoteRepositoryUrl: remoteBare));
 
-        var cleanup = await manager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest(
-            IssueIdentifier: "#101",
-            WorkspaceRoot: workspaceRoot,
-            SharedClonePath: sharedClonePath,
-            WorktreesRoot: worktreesRoot,
-            BeforeRemoveHook: "echo cleanup",
-            HookTimeoutMs: 10_000));
+            var cleanup = await manager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest(
+                IssueIdentifier: "#101",
+                WorkspaceRoot: workspaceRoot,
+                SharedClonePath: sharedClonePath,
+                WorktreesRoot: worktreesRoot,
+                BeforeRemoveHook: "echo cleanup",
+                HookTimeoutMs: 10_000));
 
-        Assert.True(cleanup.Existed);
-        Assert.True(cleanup.RemovedNow);
-        Assert.False(Directory.Exists(prepare.WorkspacePath));
-        Assert.Single(hookRunner.Requests);
-        Assert.Equal("before_remove", hookRunner.Requests[0].HookName);
+            Assert.True(cleanup.Existed);
+            Assert.True(cleanup.RemovedNow);
+            Assert.False(Directory.Exists(prepare.WorkspacePath));
+            Assert.Single(hookRunner.Requests);
+            Assert.Equal("before_remove", hookRunner.Requests[0].HookName);
+        }
+        finally
+        {
+            TryDeleteDirectory(tempRoot);
+        }
     }
 
     private static async Task<GitCommandResult> RunGitAsync(string workingDirectory, IReadOnlyList<string> args)
@@ -151,6 +165,21 @@ public sealed class WorkspaceManagerTests
         public Task RunHookAsync(WorkspaceHookRequest request, CancellationToken cancellationToken = default)
         {
             return Task.CompletedTask;
+        }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch
+        {
+            // Best-effort test cleanup.
         }
     }
 

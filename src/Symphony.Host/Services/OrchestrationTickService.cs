@@ -132,7 +132,7 @@ public sealed class OrchestrationTickService(
         }
         finally
         {
-            await coordinationStore.ReleaseLeaseAsync(leaseName, instanceId, cancellationToken);
+            await coordinationStore.ReleaseLeaseAsync(leaseName, instanceId, CancellationToken.None);
         }
     }
 

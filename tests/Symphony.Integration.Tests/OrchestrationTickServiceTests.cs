@@ -319,6 +319,33 @@ public sealed class OrchestrationTickServiceTests
         Assert.Empty(coordinationStore.ReleasedLeases);
     }
 
+    [Fact]
+    public async Task RunStartupCleanupAsync_ShouldReleaseLeaseWithUncancellableToken()
+    {
+        var workflow = BuildWorkflowDefinition(maxConcurrentAgents: 1);
+        var tracker = new FakeTrackerClient([], []);
+        var coordinationStore = new FakeCoordinationStore(leaseGranted: true);
+        var workspaceManager = new FakeWorkspaceManager();
+        var hookRunner = new FakeWorkspaceHookRunner();
+        var agentRunner = new FakeAgentRunner();
+
+        var service = CreateService(
+            workflow,
+            tracker,
+            coordinationStore,
+            workspaceManager,
+            hookRunner,
+            agentRunner);
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await service.RunStartupCleanupAsync(cts.Token);
+
+        var releaseToken = Assert.Single(coordinationStore.LeaseReleaseTokens);
+        Assert.False(releaseToken.CanBeCanceled);
+    }
+
     private static OrchestrationTickService CreateService(
         WorkflowDefinition workflowDefinition,
         FakeTrackerClient tracker,
@@ -458,6 +485,7 @@ public sealed class OrchestrationTickServiceTests
 
         public List<string> ClaimAttempts { get; } = [];
         public List<string> ReleasedLeases { get; } = [];
+        public List<CancellationToken> LeaseReleaseTokens { get; } = [];
         public List<(string IssueId, string InstanceId, string ReleaseStatus)> ReleaseCalls { get; } = [];
 
         public Task<bool> AcquireOrRenewLeaseAsync(
@@ -472,6 +500,7 @@ public sealed class OrchestrationTickServiceTests
         public Task ReleaseLeaseAsync(string leaseName, string instanceId, CancellationToken cancellationToken = default)
         {
             ReleasedLeases.Add(leaseName);
+            LeaseReleaseTokens.Add(cancellationToken);
             return Task.CompletedTask;
         }
 
