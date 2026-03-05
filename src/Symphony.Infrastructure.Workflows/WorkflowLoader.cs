@@ -172,6 +172,19 @@ public sealed class WorkflowLoader
             throw new WorkflowLoadException("invalid_workspace_base_branch", "workspace.base_branch must be non-empty.");
         }
 
+        var codexMap = GetOptionalMap(config, "codex");
+        var codexCommand = GetOptionalStringFromOptionalMap(codexMap, "command") ?? "codex app-server";
+        if (string.IsNullOrWhiteSpace(codexCommand))
+        {
+            throw new WorkflowLoadException("invalid_codex_command", "codex.command must be non-empty.");
+        }
+
+        var codexTimeoutMs = GetOptionalInt(codexMap, "timeout_ms", 3_600_000);
+        if (codexTimeoutMs <= 0)
+        {
+            throw new WorkflowLoadException("invalid_codex_timeout", "codex.timeout_ms must be > 0.");
+        }
+
         return new WorkflowRuntimeSettings(
             new WorkflowTrackerSettings(
                 kind.ToLowerInvariant(),
@@ -190,7 +203,10 @@ public sealed class WorkflowLoader
                 sharedClonePath,
                 worktreesRoot,
                 baseBranch,
-                remoteUrl));
+                remoteUrl),
+            new WorkflowCodexSettings(
+                codexCommand,
+                codexTimeoutMs));
     }
 
     private static Dictionary<string, object?>? GetOptionalMap(IReadOnlyDictionary<string, object?> source, string key)

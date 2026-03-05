@@ -16,6 +16,9 @@ polling:
   interval_ms: 600000
 agent:
   max_concurrent_agents: 5
+codex:
+  command: codex app-server
+  timeout_ms: 3600000
 workspace:
   root: ./workspaces
   shared_clone_path: ./workspaces/repo

@@ -16,6 +16,7 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<WorkflowLoader>();
         services.AddSingleton<IWorkflowDefinitionProvider, WorkflowDefinitionProvider>();
+        services.AddSingleton<IWorkflowPromptRenderer, WorkflowPromptRenderer>();
 
         return services;
     }

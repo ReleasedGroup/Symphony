@@ -44,6 +44,8 @@ public sealed class WorkflowLoaderTests
         Assert.Equal("./workspaces/repo", definition.Runtime.Workspace.SharedClonePath);
         Assert.Equal("./workspaces/worktrees", definition.Runtime.Workspace.WorktreesRoot);
         Assert.Equal("main", definition.Runtime.Workspace.BaseBranch);
+        Assert.Equal("codex app-server", definition.Runtime.Codex.Command);
+        Assert.Equal(3_600_000, definition.Runtime.Codex.TimeoutMs);
         Assert.Equal("Test prompt body.", definition.PromptTemplate);
 
         File.Delete(workflowPath);
@@ -84,6 +86,57 @@ public sealed class WorkflowLoaderTests
 
         var second = await provider.GetCurrentAsync();
         Assert.Equal("owner-a", second.Runtime.Tracker.Owner);
+
+        File.Delete(workflowPath);
+    }
+
+    [Fact]
+    public async Task LoadAsync_ShouldParseCodexSettings()
+    {
+        var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+        await File.WriteAllTextAsync(workflowPath, """
+            ---
+            tracker:
+              kind: github
+              api_key: test-token
+              owner: released
+              repo: symphony
+            codex:
+              command: codex app-server --verbose
+              timeout_ms: 120000
+            ---
+            Prompt body.
+            """);
+
+        var loader = new WorkflowLoader();
+        var definition = await loader.LoadAsync(workflowPath);
+
+        Assert.Equal("codex app-server --verbose", definition.Runtime.Codex.Command);
+        Assert.Equal(120000, definition.Runtime.Codex.TimeoutMs);
+
+        File.Delete(workflowPath);
+    }
+
+    [Fact]
+    public async Task LoadAsync_ShouldRejectInvalidCodexTimeout()
+    {
+        var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+        await File.WriteAllTextAsync(workflowPath, """
+            ---
+            tracker:
+              kind: github
+              api_key: test-token
+              owner: released
+              repo: symphony
+            codex:
+              timeout_ms: 0
+            ---
+            Prompt body.
+            """);
+
+        var loader = new WorkflowLoader();
+        var ex = await Assert.ThrowsAsync<WorkflowLoadException>(() => loader.LoadAsync(workflowPath));
+        Assert.Equal("invalid_codex_timeout", ex.Code);
 
         File.Delete(workflowPath);
     }
