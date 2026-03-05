@@ -54,11 +54,36 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         TrackerQuery query,
         CancellationToken cancellationToken = default)
     {
+        return await FetchIssuesInternalAsync(
+            query,
+            states: query.ActiveStates,
+            applyCandidateFilters: true,
+            cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<NormalizedIssue>> FetchIssuesByStatesAsync(
+        TrackerQuery query,
+        IReadOnlyList<string> states,
+        CancellationToken cancellationToken = default)
+    {
+        return await FetchIssuesInternalAsync(
+            query,
+            states,
+            applyCandidateFilters: false,
+            cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<NormalizedIssue>> FetchIssuesInternalAsync(
+        TrackerQuery query,
+        IReadOnlyList<string> states,
+        bool applyCandidateFilters,
+        CancellationToken cancellationToken)
+    {
         var candidateIssues = new List<NormalizedIssue>();
         var cursor = default(string);
         var hasNextPage = true;
 
-        var states = BuildIssueStates(query.ActiveStates);
+        var issueStates = BuildIssueStates(states);
         var endpoint = string.IsNullOrWhiteSpace(query.Endpoint) ? "https://api.github.com/graphql" : query.Endpoint;
 
         while (hasNextPage)
@@ -73,8 +98,8 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
                 {
                     owner = query.Owner,
                     repo = query.Repo,
-                    states,
-                    labels = query.Labels.Count == 0 ? null : query.Labels,
+                    states = issueStates,
+                    labels = applyCandidateFilters && query.Labels.Count != 0 ? query.Labels : null,
                     first = query.PageSize <= 0 ? 50 : query.PageSize,
                     after = cursor
                 }
@@ -104,17 +129,18 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
             foreach (var issueNode in issuesElement.GetProperty("nodes").EnumerateArray())
             {
                 var issue = ParseIssue(issueNode);
-                if (!MatchesMilestone(issue.Milestone, issueNode, query.Milestone))
+
+                if (applyCandidateFilters && !MatchesMilestone(issue.Milestone, issueNode, query.Milestone))
                 {
                     continue;
                 }
 
-                if (!MatchesLabels(issue.Labels, query.Labels))
+                if (applyCandidateFilters && !MatchesLabels(issue.Labels, query.Labels))
                 {
                     continue;
                 }
 
-                if (!MatchesActiveState(issue.State, query.ActiveStates))
+                if (!MatchesActiveState(issue.State, states))
                 {
                     continue;
                 }
@@ -195,8 +221,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var state in activeStates)
         {
-            var normalized = state.Trim().ToLowerInvariant();
-            if (normalized is "closed" or "done" or "resolved" or "completed")
+            if (IsClosedState(state))
             {
                 result.Add("CLOSED");
             }
@@ -253,14 +278,16 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
 
         if (issueState.Equals("Closed", StringComparison.OrdinalIgnoreCase))
         {
-            return configuredStates.Any(state =>
-                state.Equals("Closed", StringComparison.OrdinalIgnoreCase) ||
-                state.Equals("Done", StringComparison.OrdinalIgnoreCase));
+            return configuredStates.Any(IsClosedState);
         }
 
-        return configuredStates.Any(state =>
-            !state.Equals("Closed", StringComparison.OrdinalIgnoreCase) &&
-            !state.Equals("Done", StringComparison.OrdinalIgnoreCase));
+        return configuredStates.Any(state => !IsClosedState(state));
+    }
+
+    private static bool IsClosedState(string state)
+    {
+        var normalized = state.Trim().ToLowerInvariant();
+        return normalized is "closed" or "done" or "resolved" or "completed";
     }
 
     private static int? InferPriority(IEnumerable<string> labels)

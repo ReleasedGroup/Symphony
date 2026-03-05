@@ -13,6 +13,21 @@ public sealed class OrchestratorWorker(
     {
         logger.LogInformation("Orchestrator worker started.");
 
+        try
+        {
+            await using var startupScope = serviceScopeFactory.CreateAsyncScope();
+            var startupTickService = startupScope.ServiceProvider.GetRequiredService<OrchestrationTickService>();
+            await startupTickService.RunStartupCleanupAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Startup terminal cleanup failed. Continuing orchestrator startup.");
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             var pollIntervalMs = runtimeOptions.CurrentValue.Polling.IntervalMs;

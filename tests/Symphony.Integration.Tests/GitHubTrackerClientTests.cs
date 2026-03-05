@@ -88,6 +88,78 @@ public sealed class GitHubTrackerClientTests
         Assert.Single(issue.PullRequests);
     }
 
+    [Theory]
+    [InlineData("Closed")]
+    [InlineData("Done")]
+    [InlineData("Resolved")]
+    [InlineData("Completed")]
+    public async Task FetchIssuesByStatesAsync_ShouldReturnIssuesMatchingRequestedStates(string requestedState)
+    {
+        const string payload = """
+            {
+              "data": {
+                "repository": {
+                  "issues": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": null
+                    },
+                    "nodes": [
+                      {
+                        "id": "I_010",
+                        "number": 110,
+                        "title": "Open issue",
+                        "body": "Body open",
+                        "state": "OPEN",
+                        "url": "https://example/10",
+                        "createdAt": "2026-03-05T00:00:00Z",
+                        "updatedAt": "2026-03-05T01:00:00Z",
+                        "milestone": null,
+                        "labels": { "nodes": [] },
+                        "closedByPullRequestsReferences": { "nodes": [] }
+                      },
+                      {
+                        "id": "I_011",
+                        "number": 111,
+                        "title": "Closed issue",
+                        "body": "Body closed",
+                        "state": "CLOSED",
+                        "url": "https://example/11",
+                        "createdAt": "2026-03-05T00:00:00Z",
+                        "updatedAt": "2026-03-05T01:00:00Z",
+                        "milestone": null,
+                        "labels": { "nodes": [] },
+                        "closedByPullRequestsReferences": { "nodes": [] }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        using var httpClient = new HttpClient(new StaticJsonHandler(payload))
+        {
+            BaseAddress = new Uri("https://api.github.com/graphql")
+        };
+
+        var client = new GitHubTrackerClient(httpClient);
+        var issues = await client.FetchIssuesByStatesAsync(
+            new TrackerQuery(
+                Endpoint: "https://api.github.com/graphql",
+                ApiKey: "token",
+                Owner: "released",
+                Repo: "symphony",
+                ActiveStates: ["Open"],
+                Labels: ["backend"],
+                Milestone: "Sprint 1"),
+            states: [requestedState]);
+
+        var issue = Assert.Single(issues);
+        Assert.Equal("#111", issue.Identifier);
+        Assert.Equal("Closed", issue.State);
+    }
+
     private sealed class StaticJsonHandler(string json) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

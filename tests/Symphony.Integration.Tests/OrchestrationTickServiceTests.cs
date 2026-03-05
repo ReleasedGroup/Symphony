@@ -254,6 +254,98 @@ public sealed class OrchestrationTickServiceTests
         Assert.Equal("agent_succeeded", coordinationStore.ReleaseCalls.Single().ReleaseStatus);
     }
 
+    [Fact]
+    public async Task RunStartupCleanupAsync_ShouldCleanupTerminalIssueWorkspaces()
+    {
+        var workflow = BuildWorkflowDefinition(
+            maxConcurrentAgents: 1,
+            hooks: new WorkflowHooksSettings(
+                AfterCreate: null,
+                BeforeRun: null,
+                AfterRun: null,
+                BeforeRemove: "echo cleanup",
+                TimeoutMs: 60_000));
+        var terminalIssues = new[]
+        {
+            BuildIssue("issue-1", "#1", priority: null, createdAt: DateTimeOffset.UtcNow) with { State = "Closed" },
+            BuildIssue("issue-2", "#2", priority: null, createdAt: DateTimeOffset.UtcNow) with { State = "Closed" }
+        };
+        var tracker = new FakeTrackerClient([], terminalIssues);
+        var coordinationStore = new FakeCoordinationStore(leaseGranted: true);
+        var workspaceManager = new FakeWorkspaceManager();
+        var hookRunner = new FakeWorkspaceHookRunner();
+        var agentRunner = new FakeAgentRunner();
+
+        var service = CreateService(
+            workflow,
+            tracker,
+            coordinationStore,
+            workspaceManager,
+            hookRunner,
+            agentRunner);
+
+        await service.RunStartupCleanupAsync(CancellationToken.None);
+
+        Assert.True(tracker.FetchByStatesCalled);
+        Assert.Equal(2, workspaceManager.CleanupRequests.Count);
+        Assert.All(
+            workspaceManager.CleanupRequests,
+            request => Assert.Equal("echo cleanup", request.BeforeRemoveHook));
+        Assert.Contains("poll-dispatch", coordinationStore.ReleasedLeases);
+    }
+
+    [Fact]
+    public async Task RunStartupCleanupAsync_ShouldSkipWhenLeaseNotOwned()
+    {
+        var workflow = BuildWorkflowDefinition(maxConcurrentAgents: 1);
+        var tracker = new FakeTrackerClient([], []);
+        var coordinationStore = new FakeCoordinationStore(leaseGranted: false);
+        var workspaceManager = new FakeWorkspaceManager();
+        var hookRunner = new FakeWorkspaceHookRunner();
+        var agentRunner = new FakeAgentRunner();
+
+        var service = CreateService(
+            workflow,
+            tracker,
+            coordinationStore,
+            workspaceManager,
+            hookRunner,
+            agentRunner);
+
+        await service.RunStartupCleanupAsync(CancellationToken.None);
+
+        Assert.False(tracker.FetchByStatesCalled);
+        Assert.Empty(workspaceManager.CleanupRequests);
+        Assert.Empty(coordinationStore.ReleasedLeases);
+    }
+
+    [Fact]
+    public async Task RunStartupCleanupAsync_ShouldReleaseLeaseWithUncancellableToken()
+    {
+        var workflow = BuildWorkflowDefinition(maxConcurrentAgents: 1);
+        var tracker = new FakeTrackerClient([], []);
+        var coordinationStore = new FakeCoordinationStore(leaseGranted: true);
+        var workspaceManager = new FakeWorkspaceManager();
+        var hookRunner = new FakeWorkspaceHookRunner();
+        var agentRunner = new FakeAgentRunner();
+
+        var service = CreateService(
+            workflow,
+            tracker,
+            coordinationStore,
+            workspaceManager,
+            hookRunner,
+            agentRunner);
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await service.RunStartupCleanupAsync(cts.Token);
+
+        var releaseToken = Assert.Single(coordinationStore.LeaseReleaseTokens);
+        Assert.False(releaseToken.CanBeCanceled);
+    }
+
     private static OrchestrationTickService CreateService(
         WorkflowDefinition workflowDefinition,
         FakeTrackerClient tracker,
@@ -356,13 +448,32 @@ public sealed class OrchestrationTickServiceTests
         }
     }
 
-    private sealed class FakeTrackerClient(IReadOnlyList<NormalizedIssue> issues) : IGitHubTrackerClient
+    private sealed class FakeTrackerClient(
+        IReadOnlyList<NormalizedIssue> issues,
+        IReadOnlyList<NormalizedIssue>? terminalIssues = null,
+        bool throwOnFetchByStates = false) : IGitHubTrackerClient
     {
+        public bool FetchByStatesCalled { get; private set; }
+
         public Task<IReadOnlyList<NormalizedIssue>> FetchCandidateIssuesAsync(
             TrackerQuery query,
             CancellationToken cancellationToken = default)
         {
             return Task.FromResult(issues);
+        }
+
+        public Task<IReadOnlyList<NormalizedIssue>> FetchIssuesByStatesAsync(
+            TrackerQuery query,
+            IReadOnlyList<string> states,
+            CancellationToken cancellationToken = default)
+        {
+            FetchByStatesCalled = true;
+            if (throwOnFetchByStates)
+            {
+                throw new InvalidOperationException("terminal states fetch failed");
+            }
+
+            return Task.FromResult<IReadOnlyList<NormalizedIssue>>(terminalIssues ?? []);
         }
     }
 
@@ -373,6 +484,8 @@ public sealed class OrchestrationTickServiceTests
             : new HashSet<string>(unclaimableIssueIds, StringComparer.OrdinalIgnoreCase);
 
         public List<string> ClaimAttempts { get; } = [];
+        public List<string> ReleasedLeases { get; } = [];
+        public List<CancellationToken> LeaseReleaseTokens { get; } = [];
         public List<(string IssueId, string InstanceId, string ReleaseStatus)> ReleaseCalls { get; } = [];
 
         public Task<bool> AcquireOrRenewLeaseAsync(
@@ -386,6 +499,8 @@ public sealed class OrchestrationTickServiceTests
 
         public Task ReleaseLeaseAsync(string leaseName, string instanceId, CancellationToken cancellationToken = default)
         {
+            ReleasedLeases.Add(leaseName);
+            LeaseReleaseTokens.Add(cancellationToken);
             return Task.CompletedTask;
         }
 
@@ -412,6 +527,8 @@ public sealed class OrchestrationTickServiceTests
 
     private sealed class FakeWorkspaceManager(bool createdNow = true) : IWorkspaceManager
     {
+        public List<WorkspaceCleanupRequest> CleanupRequests { get; } = [];
+
         public Task<WorkspacePreparationResult> PrepareIssueWorkspaceAsync(
             WorkspacePreparationRequest request,
             CancellationToken cancellationToken = default)
@@ -420,6 +537,17 @@ public sealed class OrchestrationTickServiceTests
                 WorkspacePath: $"C:\\tmp\\{request.IssueIdentifier}",
                 BranchName: request.SuggestedBranchName ?? "symphony/test",
                 CreatedNow: createdNow));
+        }
+
+        public Task<WorkspaceCleanupResult> CleanupIssueWorkspaceAsync(
+            WorkspaceCleanupRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            CleanupRequests.Add(request);
+            return Task.FromResult(new WorkspaceCleanupResult(
+                WorkspacePath: $"C:\\tmp\\{request.IssueIdentifier}",
+                Existed: true,
+                RemovedNow: true));
         }
     }
 
