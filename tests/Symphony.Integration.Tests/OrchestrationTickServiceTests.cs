@@ -108,6 +108,72 @@ public sealed class OrchestrationTickServiceTests
     }
 
     [Fact]
+    public async Task RunTickAsync_ShouldSkipIssuesNoLongerActiveAfterStateReconciliation()
+    {
+        var workflow = BuildWorkflowDefinition(maxConcurrentAgents: 2);
+        var tracker = new FakeTrackerClient(
+        [
+            BuildIssue("issue-1", "#1", priority: 1, createdAt: new DateTimeOffset(2026, 01, 01, 0, 0, 0, TimeSpan.Zero)),
+            BuildIssue("issue-2", "#2", priority: 2, createdAt: new DateTimeOffset(2026, 01, 02, 0, 0, 0, TimeSpan.Zero))
+        ],
+        issueStatesById: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["issue-1"] = "Closed",
+            ["issue-2"] = "Open"
+        });
+        var coordinationStore = new FakeCoordinationStore(leaseGranted: true);
+        var workspaceManager = new FakeWorkspaceManager();
+        var hookRunner = new FakeWorkspaceHookRunner();
+        var agentRunner = new FakeAgentRunner();
+
+        var service = CreateService(
+            workflow,
+            tracker,
+            coordinationStore,
+            workspaceManager,
+            hookRunner,
+            agentRunner);
+
+        var interval = await service.RunTickAsync(CancellationToken.None);
+
+        Assert.Equal(workflow.Runtime.Polling.IntervalMs, interval);
+        Assert.True(tracker.FetchByIdsCalled);
+        Assert.Equal(["issue-1", "issue-2"], tracker.FetchedIssueIds);
+        Assert.Equal(["issue-2"], coordinationStore.ClaimAttempts);
+        Assert.Equal(["issue-2"], agentRunner.RunIssueIds);
+    }
+
+    [Fact]
+    public async Task RunTickAsync_ShouldFallbackToCandidateStatesWhenStateReconciliationFails()
+    {
+        var workflow = BuildWorkflowDefinition(maxConcurrentAgents: 1);
+        var tracker = new FakeTrackerClient(
+        [
+            BuildIssue("issue-1", "#1", priority: 1, createdAt: DateTimeOffset.UtcNow)
+        ],
+        throwOnFetchByIds: true);
+        var coordinationStore = new FakeCoordinationStore(leaseGranted: true);
+        var workspaceManager = new FakeWorkspaceManager();
+        var hookRunner = new FakeWorkspaceHookRunner();
+        var agentRunner = new FakeAgentRunner();
+
+        var service = CreateService(
+            workflow,
+            tracker,
+            coordinationStore,
+            workspaceManager,
+            hookRunner,
+            agentRunner);
+
+        var interval = await service.RunTickAsync(CancellationToken.None);
+
+        Assert.Equal(workflow.Runtime.Polling.IntervalMs, interval);
+        Assert.True(tracker.FetchByIdsCalled);
+        Assert.Equal(["issue-1"], agentRunner.RunIssueIds);
+        Assert.Equal("agent_succeeded", coordinationStore.ReleaseCalls.Single().ReleaseStatus);
+    }
+
+    [Fact]
     public async Task RunTickAsync_ShouldRunAfterCreateBeforeRunAndAfterRunHooks()
     {
         var workflow = BuildWorkflowDefinition(
@@ -451,9 +517,17 @@ public sealed class OrchestrationTickServiceTests
     private sealed class FakeTrackerClient(
         IReadOnlyList<NormalizedIssue> issues,
         IReadOnlyList<NormalizedIssue>? terminalIssues = null,
-        bool throwOnFetchByStates = false) : IGitHubTrackerClient
+        bool throwOnFetchByStates = false,
+        IReadOnlyDictionary<string, string>? issueStatesById = null,
+        bool throwOnFetchByIds = false) : IGitHubTrackerClient
     {
+        private readonly Dictionary<string, string> _issueStatesById = issueStatesById is null
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(issueStatesById, StringComparer.OrdinalIgnoreCase);
+
         public bool FetchByStatesCalled { get; private set; }
+        public bool FetchByIdsCalled { get; private set; }
+        public List<string> FetchedIssueIds { get; } = [];
 
         public Task<IReadOnlyList<NormalizedIssue>> FetchCandidateIssuesAsync(
             TrackerQuery query,
@@ -481,7 +555,21 @@ public sealed class OrchestrationTickServiceTests
             IReadOnlyList<string> issueIds,
             CancellationToken cancellationToken = default)
         {
-            return Task.FromResult<IReadOnlyList<IssueStateSnapshot>>([]);
+            FetchByIdsCalled = true;
+            FetchedIssueIds.AddRange(issueIds);
+
+            if (throwOnFetchByIds)
+            {
+                throw new InvalidOperationException("state refresh failed");
+            }
+
+            var snapshots = issueIds
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(issueId => _issueStatesById.ContainsKey(issueId))
+                .Select(issueId => new IssueStateSnapshot(issueId, _issueStatesById[issueId]))
+                .ToList();
+
+            return Task.FromResult<IReadOnlyList<IssueStateSnapshot>>(snapshots);
         }
     }
 

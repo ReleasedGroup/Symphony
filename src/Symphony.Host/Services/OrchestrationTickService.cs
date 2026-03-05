@@ -185,8 +185,14 @@ public sealed class OrchestrationTickService(
             query.Owner,
             query.Repo);
 
+        var reconciledIssues = await ReconcileCandidateStatesAsync(
+            query,
+            workflowDefinition.Runtime.Tracker.ActiveStates,
+            issues,
+            cancellationToken);
+
         var maxConcurrentAgents = workflowDefinition.Runtime.Agent.MaxConcurrentAgents;
-        var orderedIssues = OrderIssuesForDispatch(issues).ToList();
+        var orderedIssues = OrderIssuesForDispatch(reconciledIssues).ToList();
         if (orderedIssues.Count > maxConcurrentAgents)
         {
             logger.LogInformation(
@@ -481,6 +487,104 @@ public sealed class OrchestrationTickService(
                 hookName,
                 issueIdentifier);
         }
+    }
+
+    private async Task<IReadOnlyList<NormalizedIssue>> ReconcileCandidateStatesAsync(
+        TrackerQuery query,
+        IReadOnlyList<string> activeStates,
+        IReadOnlyList<NormalizedIssue> candidates,
+        CancellationToken cancellationToken)
+    {
+        if (candidates.Count == 0)
+        {
+            return candidates;
+        }
+
+        try
+        {
+            var refreshedStates = await trackerClient.FetchIssueStatesByIdsAsync(
+                query,
+                candidates.Select(issue => issue.Id).ToList(),
+                cancellationToken);
+
+            if (refreshedStates.Count == 0)
+            {
+                return candidates;
+            }
+
+            var refreshedStatesById = refreshedStates
+                .Where(state => !string.IsNullOrWhiteSpace(state.Id))
+                .GroupBy(state => state.Id, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
+
+            var filtered = new List<NormalizedIssue>(candidates.Count);
+            foreach (var candidate in candidates)
+            {
+                if (!refreshedStatesById.TryGetValue(candidate.Id, out var refreshedState))
+                {
+                    filtered.Add(candidate);
+                    continue;
+                }
+
+                if (!MatchesConfiguredActiveState(refreshedState.State, activeStates))
+                {
+                    logger.LogDebug(
+                        "Skipping candidate issue {IssueIdentifier} ({IssueId}) because refreshed state is {RefreshedState}.",
+                        candidate.Identifier,
+                        candidate.Id,
+                        refreshedState.State);
+                    continue;
+                }
+
+                filtered.Add(
+                    candidate.State.Equals(refreshedState.State, StringComparison.OrdinalIgnoreCase)
+                        ? candidate
+                        : candidate with { State = refreshedState.State });
+            }
+
+            if (filtered.Count != candidates.Count)
+            {
+                logger.LogInformation(
+                    "Filtered {FilteredCount} candidate issue(s) after state reconciliation.",
+                    candidates.Count - filtered.Count);
+            }
+
+            return filtered;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "State reconciliation failed for {Owner}/{Repo}. Continuing with candidate snapshot states.",
+                query.Owner,
+                query.Repo);
+            return candidates;
+        }
+    }
+
+    private static bool MatchesConfiguredActiveState(string issueState, IReadOnlyList<string> configuredStates)
+    {
+        if (configuredStates.Count == 0)
+        {
+            return !IsClosedStateName(issueState);
+        }
+
+        if (IsClosedStateName(issueState))
+        {
+            return configuredStates.Any(IsClosedStateName);
+        }
+
+        return configuredStates.Any(state => !IsClosedStateName(state));
+    }
+
+    private static bool IsClosedStateName(string state)
+    {
+        var normalized = state.Trim().ToLowerInvariant();
+        return normalized is "closed" or "done" or "resolved" or "completed";
     }
 
     private static IEnumerable<NormalizedIssue> OrderIssuesForDispatch(IEnumerable<NormalizedIssue> issues)
