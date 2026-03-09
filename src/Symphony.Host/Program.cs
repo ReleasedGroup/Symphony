@@ -48,6 +48,7 @@ builder.Services.AddHostedService<OrchestratorWorker>();
 
 var app = builder.Build();
 
+await ValidateWorkflowDispatchPreflightAsync(app.Services);
 await app.Services.ApplySymphonyMigrationsAsync();
 
 app.MapHealthChecks("/api/v1/health", new HealthCheckOptions
@@ -79,6 +80,7 @@ app.MapGet("/api/v1/runtime", async (
                 definition.Runtime.Tracker.Owner,
                 definition.Runtime.Tracker.Repo,
                 definition.Runtime.Tracker.Milestone,
+                definition.Runtime.Tracker.IncludePullRequests,
                 labels = definition.Runtime.Tracker.Labels,
                 activeStates = definition.Runtime.Tracker.ActiveStates,
                 terminalStates = definition.Runtime.Tracker.TerminalStates
@@ -89,16 +91,20 @@ app.MapGet("/api/v1/runtime", async (
             },
             agent = new
             {
-                definition.Runtime.Agent.MaxConcurrentAgents
+                definition.Runtime.Agent.MaxConcurrentAgents,
+                definition.Runtime.Agent.MaxTurns,
+                definition.Runtime.Agent.MaxRetryBackoffMs,
+                maxConcurrentAgentsByState = definition.Runtime.Agent.MaxConcurrentAgentsByState
             },
             codex = new
             {
                 definition.Runtime.Codex.Command,
-                definition.Runtime.Codex.TimeoutMs,
+                definition.Runtime.Codex.TurnTimeoutMs,
                 definition.Runtime.Codex.ApprovalPolicy,
                 definition.Runtime.Codex.ThreadSandbox,
                 definition.Runtime.Codex.TurnSandboxPolicy,
-                definition.Runtime.Codex.ReadTimeoutMs
+                definition.Runtime.Codex.ReadTimeoutMs,
+                definition.Runtime.Codex.StallTimeoutMs
             },
             workspace = new
             {
@@ -156,6 +162,14 @@ return;
 static bool ValidateRuntimeOptions(SymphonyRuntimeOptions options)
 {
     return options.Polling.IntervalMs >= 1_000 && options.Agent.MaxConcurrentAgents > 0;
+}
+
+static async Task ValidateWorkflowDispatchPreflightAsync(IServiceProvider services)
+{
+    await using var scope = services.CreateAsyncScope();
+    var workflowProvider = scope.ServiceProvider.GetRequiredService<IWorkflowDefinitionProvider>();
+    var definition = await workflowProvider.GetCurrentAsync();
+    WorkflowDispatchPreflightValidator.ValidateAndResolveApiKey(definition);
 }
 
 public partial class Program;
