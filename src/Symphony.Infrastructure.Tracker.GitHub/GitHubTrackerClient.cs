@@ -247,7 +247,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
 
             foreach (var issueNode in issuesElement.GetProperty("nodes").EnumerateArray())
             {
-                var issue = ParseIssue(issueNode);
+                var issue = ParseIssue(issueNode, query.IncludePullRequests);
 
                 if (applyCandidateFilters && !MatchesMilestone(issue.Milestone, issueNode, query.Milestone))
                 {
@@ -290,7 +290,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         return candidateIssues;
     }
 
-    private static NormalizedIssue ParseIssue(JsonElement issueNode)
+    private static NormalizedIssue ParseIssue(JsonElement issueNode, bool includePullRequests)
     {
         var labels = issueNode
             .GetProperty("labels")
@@ -302,18 +302,20 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var pullRequests = issueNode
-            .GetProperty("closedByPullRequestsReferences")
-            .GetProperty("nodes")
-            .EnumerateArray()
-            .Select(node => new PullRequestRef(
-                GetOptionalString(node, "id"),
-                GetOptionalInt(node, "number"),
-                GetOptionalString(node, "state"),
-                GetOptionalString(node, "url"),
-                GetOptionalString(node, "headRefName"),
-                GetOptionalString(node, "baseRefName")))
-            .ToList();
+        var pullRequests = includePullRequests
+            ? issueNode
+                .GetProperty("closedByPullRequestsReferences")
+                .GetProperty("nodes")
+                .EnumerateArray()
+                .Select(node => new PullRequestRef(
+                    GetOptionalString(node, "id"),
+                    GetOptionalInt(node, "number"),
+                    GetOptionalString(node, "state"),
+                    GetOptionalString(node, "url"),
+                    GetOptionalString(node, "headRefName"),
+                    GetOptionalString(node, "baseRefName")))
+                .ToList()
+            : [];
 
         var milestoneTitle = issueNode.TryGetProperty("milestone", out var milestoneNode) &&
                              milestoneNode.ValueKind != JsonValueKind.Null &&
@@ -325,7 +327,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         var normalizedState = issueState.Equals("CLOSED", StringComparison.OrdinalIgnoreCase) ? "Closed" : "Open";
         var number = GetOptionalInt(issueNode, "number");
         var identifier = number is null ? GetOptionalString(issueNode, "id") ?? "unknown" : $"#{number.Value}";
-        var branchName = pullRequests.FirstOrDefault()?.HeadRef;
+        var branchName = includePullRequests ? pullRequests.FirstOrDefault()?.HeadRef : null;
 
         return new NormalizedIssue(
             Id: GetOptionalString(issueNode, "id") ?? Guid.NewGuid().ToString("N"),

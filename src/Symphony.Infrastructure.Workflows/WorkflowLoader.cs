@@ -1,7 +1,7 @@
 using Symphony.Core.Defaults;
 using Symphony.Infrastructure.Workflows.Models;
-using YamlDotNet.Serialization;
 using YamlDotNet.Core;
+using YamlDotNet.Serialization;
 
 namespace Symphony.Infrastructure.Workflows;
 
@@ -142,6 +142,7 @@ public sealed class WorkflowLoader
         var owner = GetRequiredString(trackerMap, "owner", "missing_tracker_owner");
         var repo = GetRequiredString(trackerMap, "repo", "missing_tracker_repo");
         var milestone = GetOptionalStringOrNumber(trackerMap, "milestone");
+        var includePullRequests = GetOptionalBoolean(trackerMap, "include_pull_requests", defaultValue: true);
         var labels = GetStringList(trackerMap, "labels", []);
         var activeStates = GetStringList(trackerMap, "active_states", ["Open", "In Progress"]);
         var terminalStates = GetStringList(trackerMap, "terminal_states", ["Closed"]);
@@ -160,10 +161,24 @@ public sealed class WorkflowLoader
             throw new WorkflowLoadException("invalid_max_concurrent_agents", "agent.max_concurrent_agents must be > 0.");
         }
 
+        var maxTurns = GetOptionalInt(agentMap, "max_turns", 20);
+        if (maxTurns <= 0)
+        {
+            throw new WorkflowLoadException("invalid_agent_max_turns", "agent.max_turns must be > 0.");
+        }
+
+        var maxRetryBackoffMs = GetOptionalInt(agentMap, "max_retry_backoff_ms", 300_000);
+        if (maxRetryBackoffMs <= 0)
+        {
+            throw new WorkflowLoadException("invalid_agent_max_retry_backoff", "agent.max_retry_backoff_ms must be > 0.");
+        }
+
+        var maxConcurrentAgentsByState = GetNormalizedPositiveIntMap(agentMap, "max_concurrent_agents_by_state");
+
         var workspaceMap = GetOptionalMap(config, "workspace");
-        var workspaceRoot = GetOptionalStringFromOptionalMap(workspaceMap, "root") ?? "./workspaces";
-        var sharedClonePath = GetOptionalStringFromOptionalMap(workspaceMap, "shared_clone_path") ?? "./workspaces/repo";
-        var worktreesRoot = GetOptionalStringFromOptionalMap(workspaceMap, "worktrees_root") ?? "./workspaces/worktrees";
+        var workspaceRoot = GetResolvedPathLikeValue(workspaceMap, "root", "./workspaces");
+        var sharedClonePath = GetResolvedPathLikeValue(workspaceMap, "shared_clone_path", "./workspaces/repo");
+        var worktreesRoot = GetResolvedPathLikeValue(workspaceMap, "worktrees_root", "./workspaces/worktrees");
         var baseBranch = GetOptionalStringFromOptionalMap(workspaceMap, "base_branch") ?? "main";
         var remoteUrl = GetOptionalStringFromOptionalMap(workspaceMap, "remote_url");
 
@@ -180,7 +195,7 @@ public sealed class WorkflowLoader
         var hooksTimeoutMs = GetOptionalInt(hooksMap, "timeout_ms", 60_000);
         if (hooksTimeoutMs <= 0)
         {
-            throw new WorkflowLoadException("invalid_hooks_timeout", "hooks.timeout_ms must be > 0.");
+            hooksTimeoutMs = 60_000;
         }
 
         var codexMap = GetOptionalMap(config, "codex");
@@ -190,10 +205,13 @@ public sealed class WorkflowLoader
             throw new WorkflowLoadException("invalid_codex_command", "codex.command must be non-empty.");
         }
 
-        var codexTimeoutMs = GetOptionalInt(codexMap, "timeout_ms", 3_600_000);
-        if (codexTimeoutMs <= 0)
+        var codexTurnTimeoutMs = GetOptionalInt(
+            codexMap,
+            "turn_timeout_ms",
+            GetOptionalInt(codexMap, "timeout_ms", 3_600_000));
+        if (codexTurnTimeoutMs <= 0)
         {
-            throw new WorkflowLoadException("invalid_codex_timeout", "codex.timeout_ms must be > 0.");
+            throw new WorkflowLoadException("invalid_codex_turn_timeout", "codex.turn_timeout_ms must be > 0.");
         }
 
         var codexApprovalPolicy = GetOptionalStringFromOptionalMap(codexMap, "approval_policy") ?? "never";
@@ -220,6 +238,8 @@ public sealed class WorkflowLoader
             throw new WorkflowLoadException("invalid_codex_read_timeout", "codex.read_timeout_ms must be > 0.");
         }
 
+        var codexStallTimeoutMs = GetOptionalInt(codexMap, "stall_timeout_ms", 300_000);
+
         return new WorkflowRuntimeSettings(
             new WorkflowTrackerSettings(
                 kind.ToLowerInvariant(),
@@ -228,11 +248,16 @@ public sealed class WorkflowLoader
                 owner,
                 repo,
                 milestone,
+                includePullRequests,
                 labels,
                 activeStates,
                 terminalStates),
             new WorkflowPollingSettings(intervalMs),
-            new WorkflowAgentSettings(maxConcurrentAgents),
+            new WorkflowAgentSettings(
+                maxConcurrentAgents,
+                maxTurns,
+                maxRetryBackoffMs,
+                maxConcurrentAgentsByState),
             new WorkflowWorkspaceSettings(
                 workspaceRoot,
                 sharedClonePath,
@@ -247,11 +272,12 @@ public sealed class WorkflowLoader
                 hooksTimeoutMs),
             new WorkflowCodexSettings(
                 codexCommand,
-                codexTimeoutMs,
+                codexTurnTimeoutMs,
                 codexApprovalPolicy,
                 codexThreadSandbox,
                 codexTurnSandboxPolicy,
-                codexReadTimeoutMs));
+                codexReadTimeoutMs,
+                codexStallTimeoutMs));
     }
 
     private static Dictionary<string, object?>? GetOptionalMap(IReadOnlyDictionary<string, object?> source, string key)
@@ -319,6 +345,18 @@ public sealed class WorkflowLoader
         return string.IsNullOrWhiteSpace(script) ? null : script;
     }
 
+    private static string GetResolvedPathLikeValue(Dictionary<string, object?>? source, string key, string defaultValue)
+    {
+        var configuredValue = GetOptionalStringFromOptionalMap(source, key);
+        if (string.IsNullOrWhiteSpace(configuredValue))
+        {
+            return defaultValue;
+        }
+
+        var resolvedValue = WorkflowValueResolver.ResolvePathLikeValue(configuredValue);
+        return string.IsNullOrWhiteSpace(resolvedValue) ? defaultValue : resolvedValue;
+    }
+
     private static string? GetOptionalStringOrNumber(Dictionary<string, object?> source, string key)
     {
         if (!source.TryGetValue(key, out var raw) || raw is null)
@@ -332,6 +370,21 @@ public sealed class WorkflowLoader
             int intValue => intValue.ToString(),
             long longValue => longValue.ToString(),
             _ => throw new WorkflowLoadException("workflow_parse_error", $"'{key}' must be a string or integer.")
+        };
+    }
+
+    private static bool GetOptionalBoolean(Dictionary<string, object?> source, string key, bool defaultValue)
+    {
+        if (!source.TryGetValue(key, out var raw) || raw is null)
+        {
+            return defaultValue;
+        }
+
+        return raw switch
+        {
+            bool boolValue => boolValue,
+            string str when bool.TryParse(str, out var parsed) => parsed,
+            _ => throw new WorkflowLoadException("workflow_parse_error", $"'{key}' must be a boolean.")
         };
     }
 
@@ -364,6 +417,33 @@ public sealed class WorkflowLoader
         }
     }
 
+    private static Dictionary<string, int> GetNormalizedPositiveIntMap(Dictionary<string, object?>? source, string key)
+    {
+        if (source is null || !source.TryGetValue(key, out var raw) || raw is null)
+        {
+            return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        if (raw is not Dictionary<string, object?> map)
+        {
+            throw new WorkflowLoadException("workflow_parse_error", $"'{key}' must be an object/map.");
+        }
+
+        var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (rawState, rawValue) in map)
+        {
+            var normalizedState = NormalizeStateKey(rawState);
+            if (string.IsNullOrWhiteSpace(normalizedState) || !TryGetInt(rawValue, out var parsedValue) || parsedValue <= 0)
+            {
+                continue;
+            }
+
+            result[normalizedState] = parsedValue;
+        }
+
+        return result;
+    }
+
     private static int GetOptionalInt(Dictionary<string, object?>? source, string key, int defaultValue)
     {
         if (source is null || !source.TryGetValue(key, out var raw) || raw is null)
@@ -371,12 +451,35 @@ public sealed class WorkflowLoader
             return defaultValue;
         }
 
-        return raw switch
+        if (!TryGetInt(raw, out var parsed))
         {
-            int intValue => intValue,
-            long longValue when longValue <= int.MaxValue && longValue >= int.MinValue => (int)longValue,
-            string str when int.TryParse(str, out var parsed) => parsed,
-            _ => throw new WorkflowLoadException("workflow_parse_error", $"'{key}' must be an integer.")
-        };
+            throw new WorkflowLoadException("workflow_parse_error", $"'{key}' must be an integer.");
+        }
+
+        return parsed;
+    }
+
+    private static bool TryGetInt(object? raw, out int value)
+    {
+        switch (raw)
+        {
+            case int intValue:
+                value = intValue;
+                return true;
+            case long longValue when longValue <= int.MaxValue && longValue >= int.MinValue:
+                value = (int)longValue;
+                return true;
+            case string str when int.TryParse(str, out var parsed):
+                value = parsed;
+                return true;
+            default:
+                value = default;
+                return false;
+        }
+    }
+
+    private static string NormalizeStateKey(string rawState)
+    {
+        return rawState.Trim().ToLowerInvariant();
     }
 }

@@ -88,6 +88,71 @@ public sealed class GitHubTrackerClientTests
         Assert.Single(issue.PullRequests);
     }
 
+    [Fact]
+    public async Task FetchCandidateIssuesAsync_ShouldOmitPullRequestMetadataWhenDisabled()
+    {
+        const string payload = """
+            {
+              "data": {
+                "repository": {
+                  "issues": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": null
+                    },
+                    "nodes": [
+                      {
+                        "id": "I_001",
+                        "number": 101,
+                        "title": "Issue one",
+                        "body": "Body one",
+                        "state": "OPEN",
+                        "url": "https://example/1",
+                        "createdAt": "2026-03-05T00:00:00Z",
+                        "updatedAt": "2026-03-05T01:00:00Z",
+                        "milestone": null,
+                        "labels": { "nodes": [] },
+                        "closedByPullRequestsReferences": {
+                          "nodes": [
+                            {
+                              "id": "PR_1",
+                              "number": 501,
+                              "state": "OPEN",
+                              "url": "https://example/pr/1",
+                              "headRefName": "feature/1",
+                              "baseRefName": "main"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        using var httpClient = new HttpClient(new StaticJsonHandler(payload))
+        {
+            BaseAddress = new Uri("https://api.github.com/graphql")
+        };
+
+        var client = new GitHubTrackerClient(httpClient);
+        var issues = await client.FetchCandidateIssuesAsync(new TrackerQuery(
+            Endpoint: "https://api.github.com/graphql",
+            ApiKey: "token",
+            Owner: "released",
+            Repo: "symphony",
+            ActiveStates: ["Open"],
+            Labels: [],
+            Milestone: null,
+            IncludePullRequests: false));
+
+        var issue = Assert.Single(issues);
+        Assert.Empty(issue.PullRequests);
+        Assert.Null(issue.BranchName);
+    }
+
     [Theory]
     [InlineData("Closed")]
     [InlineData("Done")]

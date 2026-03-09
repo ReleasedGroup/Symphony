@@ -13,7 +13,7 @@ public sealed class WorkflowLoaderTests
     [Fact]
     public async Task LoadAsync_ShouldParseFrontMatterAndPrompt()
     {
-        var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+        var workflowPath = CreateWorkflowPath();
         await File.WriteAllTextAsync(workflowPath, """
             ---
             tracker:
@@ -32,38 +32,48 @@ public sealed class WorkflowLoaderTests
             Test prompt body.
             """);
 
-        var loader = new WorkflowLoader();
-        var definition = await loader.LoadAsync(workflowPath);
+        try
+        {
+            var loader = new WorkflowLoader();
+            var definition = await loader.LoadAsync(workflowPath);
 
-        Assert.Equal("github", definition.Runtime.Tracker.Kind);
-        Assert.Equal("released", definition.Runtime.Tracker.Owner);
-        Assert.Equal("symphony", definition.Runtime.Tracker.Repo);
-        Assert.Equal(120000, definition.Runtime.Polling.IntervalMs);
-        Assert.Equal(3, definition.Runtime.Agent.MaxConcurrentAgents);
-        Assert.Equal("./workspaces", definition.Runtime.Workspace.Root);
-        Assert.Equal("./workspaces/repo", definition.Runtime.Workspace.SharedClonePath);
-        Assert.Equal("./workspaces/worktrees", definition.Runtime.Workspace.WorktreesRoot);
-        Assert.Equal("main", definition.Runtime.Workspace.BaseBranch);
-        Assert.Null(definition.Runtime.Hooks.AfterCreate);
-        Assert.Null(definition.Runtime.Hooks.BeforeRun);
-        Assert.Null(definition.Runtime.Hooks.AfterRun);
-        Assert.Null(definition.Runtime.Hooks.BeforeRemove);
-        Assert.Equal(60_000, definition.Runtime.Hooks.TimeoutMs);
-        Assert.Equal("codex app-server", definition.Runtime.Codex.Command);
-        Assert.Equal(3_600_000, definition.Runtime.Codex.TimeoutMs);
-        Assert.Equal("never", definition.Runtime.Codex.ApprovalPolicy);
-        Assert.Equal("danger-full-access", definition.Runtime.Codex.ThreadSandbox);
-        Assert.Equal("danger-full-access", definition.Runtime.Codex.TurnSandboxPolicy);
-        Assert.Equal(5_000, definition.Runtime.Codex.ReadTimeoutMs);
-        Assert.Equal("Test prompt body.", definition.PromptTemplate);
-
-        File.Delete(workflowPath);
+            Assert.Equal("github", definition.Runtime.Tracker.Kind);
+            Assert.Equal("released", definition.Runtime.Tracker.Owner);
+            Assert.Equal("symphony", definition.Runtime.Tracker.Repo);
+            Assert.True(definition.Runtime.Tracker.IncludePullRequests);
+            Assert.Equal(120000, definition.Runtime.Polling.IntervalMs);
+            Assert.Equal(3, definition.Runtime.Agent.MaxConcurrentAgents);
+            Assert.Equal(20, definition.Runtime.Agent.MaxTurns);
+            Assert.Equal(300_000, definition.Runtime.Agent.MaxRetryBackoffMs);
+            Assert.Empty(definition.Runtime.Agent.MaxConcurrentAgentsByState);
+            Assert.Equal("./workspaces", definition.Runtime.Workspace.Root);
+            Assert.Equal("./workspaces/repo", definition.Runtime.Workspace.SharedClonePath);
+            Assert.Equal("./workspaces/worktrees", definition.Runtime.Workspace.WorktreesRoot);
+            Assert.Equal("main", definition.Runtime.Workspace.BaseBranch);
+            Assert.Null(definition.Runtime.Hooks.AfterCreate);
+            Assert.Null(definition.Runtime.Hooks.BeforeRun);
+            Assert.Null(definition.Runtime.Hooks.AfterRun);
+            Assert.Null(definition.Runtime.Hooks.BeforeRemove);
+            Assert.Equal(60_000, definition.Runtime.Hooks.TimeoutMs);
+            Assert.Equal("codex app-server", definition.Runtime.Codex.Command);
+            Assert.Equal(3_600_000, definition.Runtime.Codex.TurnTimeoutMs);
+            Assert.Equal("never", definition.Runtime.Codex.ApprovalPolicy);
+            Assert.Equal("danger-full-access", definition.Runtime.Codex.ThreadSandbox);
+            Assert.Equal("danger-full-access", definition.Runtime.Codex.TurnSandboxPolicy);
+            Assert.Equal(5_000, definition.Runtime.Codex.ReadTimeoutMs);
+            Assert.Equal(300_000, definition.Runtime.Codex.StallTimeoutMs);
+            Assert.Equal("Test prompt body.", definition.PromptTemplate);
+        }
+        finally
+        {
+            File.Delete(workflowPath);
+        }
     }
 
     [Fact]
-    public async Task Provider_ShouldKeepLastKnownGoodWhenReloadFails()
+    public async Task Provider_ShouldReloadWhenWorkflowChanges()
     {
-        var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+        var workflowPath = CreateWorkflowPath();
         await File.WriteAllTextAsync(workflowPath, """
             ---
             tracker:
@@ -76,33 +86,143 @@ public sealed class WorkflowLoaderTests
             Prompt A
             """);
 
-        var provider = new WorkflowDefinitionProvider(
-            new WorkflowLoader(),
-            Options.Create(new WorkflowLoaderOptions { Path = workflowPath }),
-            new TestHostEnvironment(Path.GetTempPath()),
-            NullLogger<WorkflowDefinitionProvider>.Instance);
+        try
+        {
+            var provider = CreateProvider(workflowPath);
 
-        var first = await provider.GetCurrentAsync();
-        Assert.Equal("owner-a", first.Runtime.Tracker.Owner);
+            var first = await provider.GetCurrentAsync();
+            Assert.Equal("owner-a", first.Runtime.Tracker.Owner);
 
-        await Task.Delay(50);
+            await File.WriteAllTextAsync(workflowPath, """
+                ---
+                tracker:
+                  kind: github
+                  endpoint: https://api.github.com/graphql
+                  api_key: test-token
+                  owner: owner-bb
+                  repo: repo-bb
+                ---
+                Prompt B updated
+                """);
+
+            var second = await provider.GetCurrentAsync();
+            Assert.Equal("owner-bb", second.Runtime.Tracker.Owner);
+            Assert.Equal("Prompt B updated", second.PromptTemplate);
+        }
+        finally
+        {
+            File.Delete(workflowPath);
+        }
+    }
+
+    [Fact]
+    public async Task Provider_ShouldKeepLastKnownGoodWhenReloadFails()
+    {
+        var workflowPath = CreateWorkflowPath();
         await File.WriteAllTextAsync(workflowPath, """
             ---
             tracker:
               kind: github
-              owner: owner-b
+              endpoint: https://api.github.com/graphql
+              api_key: test-token
+              owner: owner-a
+              repo: repo-a
+            ---
+            Prompt A
             """);
 
-        var second = await provider.GetCurrentAsync();
-        Assert.Equal("owner-a", second.Runtime.Tracker.Owner);
+        try
+        {
+            var provider = CreateProvider(workflowPath);
 
-        File.Delete(workflowPath);
+            var first = await provider.GetCurrentAsync();
+            Assert.Equal("owner-a", first.Runtime.Tracker.Owner);
+
+            await File.WriteAllTextAsync(workflowPath, """
+                ---
+                tracker:
+                  kind: github
+                  owner: owner-b
+                """);
+
+            var second = await provider.GetCurrentAsync();
+            Assert.Equal("owner-a", second.Runtime.Tracker.Owner);
+        }
+        finally
+        {
+            File.Delete(workflowPath);
+        }
+    }
+
+    [Fact]
+    public async Task LoadAsync_ShouldParseExtendedWorkflowSettings()
+    {
+        var workflowPath = CreateWorkflowPath();
+        var workspaceRootEnvVar = $"SYMPHONY_WORKFLOW_ROOT_{Guid.NewGuid():N}";
+        var workspaceRoot = Path.Combine(Path.GetTempPath(), $"workflow-root-{Guid.NewGuid():N}");
+        Environment.SetEnvironmentVariable(workspaceRootEnvVar, workspaceRoot);
+
+        try
+        {
+            await File.WriteAllTextAsync(workflowPath, $$"""
+                ---
+                tracker:
+                  kind: github
+                  endpoint: https://api.github.com/graphql
+                  api_key: $GITHUB_TOKEN
+                  owner: released
+                  repo: symphony
+                  include_pull_requests: false
+                agent:
+                  max_concurrent_agents: 4
+                  max_turns: 7
+                  max_retry_backoff_ms: "90000"
+                  max_concurrent_agents_by_state:
+                    Open: 2
+                    " In Progress ": "4"
+                    Closed: 0
+                    Invalid: nope
+                workspace:
+                  root: ${{workspaceRootEnvVar}}
+                  shared_clone_path: ~/symphony-shared
+                  worktrees_root: .\worktrees
+                codex:
+                  command: codex app-server --profile "$HOME/test"
+                  turn_timeout_ms: 120000
+                  stall_timeout_ms: 0
+                ---
+                Prompt body.
+                """);
+
+            var loader = new WorkflowLoader();
+            var definition = await loader.LoadAsync(workflowPath);
+
+            Assert.False(definition.Runtime.Tracker.IncludePullRequests);
+            Assert.Equal(7, definition.Runtime.Agent.MaxTurns);
+            Assert.Equal(90_000, definition.Runtime.Agent.MaxRetryBackoffMs);
+            Assert.Equal(2, definition.Runtime.Agent.MaxConcurrentAgentsByState["open"]);
+            Assert.Equal(4, definition.Runtime.Agent.MaxConcurrentAgentsByState["in progress"]);
+            Assert.DoesNotContain("closed", definition.Runtime.Agent.MaxConcurrentAgentsByState.Keys, StringComparer.OrdinalIgnoreCase);
+            Assert.Equal(workspaceRoot, definition.Runtime.Workspace.Root);
+            Assert.Equal(
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "symphony-shared"),
+                definition.Runtime.Workspace.SharedClonePath);
+            Assert.Equal(@".\worktrees", definition.Runtime.Workspace.WorktreesRoot);
+            Assert.Equal("codex app-server --profile \"$HOME/test\"", definition.Runtime.Codex.Command);
+            Assert.Equal(120_000, definition.Runtime.Codex.TurnTimeoutMs);
+            Assert.Equal(0, definition.Runtime.Codex.StallTimeoutMs);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(workspaceRootEnvVar, null);
+            File.Delete(workflowPath);
+        }
     }
 
     [Fact]
     public async Task LoadAsync_ShouldParseCodexSettings()
     {
-        var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+        var workflowPath = CreateWorkflowPath();
         await File.WriteAllTextAsync(workflowPath, """
             ---
             tracker:
@@ -112,32 +232,39 @@ public sealed class WorkflowLoaderTests
               repo: symphony
             codex:
               command: codex app-server --verbose
-              timeout_ms: 120000
+              turn_timeout_ms: 120000
               approval_policy: never
               thread_sandbox: workspace-write
               turn_sandbox_policy: workspace-write
               read_timeout_ms: 9000
+              stall_timeout_ms: 180000
             ---
             Prompt body.
             """);
 
-        var loader = new WorkflowLoader();
-        var definition = await loader.LoadAsync(workflowPath);
+        try
+        {
+            var loader = new WorkflowLoader();
+            var definition = await loader.LoadAsync(workflowPath);
 
-        Assert.Equal("codex app-server --verbose", definition.Runtime.Codex.Command);
-        Assert.Equal(120000, definition.Runtime.Codex.TimeoutMs);
-        Assert.Equal("never", definition.Runtime.Codex.ApprovalPolicy);
-        Assert.Equal("workspace-write", definition.Runtime.Codex.ThreadSandbox);
-        Assert.Equal("workspace-write", definition.Runtime.Codex.TurnSandboxPolicy);
-        Assert.Equal(9000, definition.Runtime.Codex.ReadTimeoutMs);
-
-        File.Delete(workflowPath);
+            Assert.Equal("codex app-server --verbose", definition.Runtime.Codex.Command);
+            Assert.Equal(120000, definition.Runtime.Codex.TurnTimeoutMs);
+            Assert.Equal("never", definition.Runtime.Codex.ApprovalPolicy);
+            Assert.Equal("workspace-write", definition.Runtime.Codex.ThreadSandbox);
+            Assert.Equal("workspace-write", definition.Runtime.Codex.TurnSandboxPolicy);
+            Assert.Equal(9000, definition.Runtime.Codex.ReadTimeoutMs);
+            Assert.Equal(180000, definition.Runtime.Codex.StallTimeoutMs);
+        }
+        finally
+        {
+            File.Delete(workflowPath);
+        }
     }
 
     [Fact]
     public async Task LoadAsync_ShouldParseHookSettings()
     {
-        var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+        var workflowPath = CreateWorkflowPath();
         await File.WriteAllTextAsync(workflowPath, """
             ---
             tracker:
@@ -159,22 +286,27 @@ public sealed class WorkflowLoaderTests
             Prompt body.
             """);
 
-        var loader = new WorkflowLoader();
-        var definition = await loader.LoadAsync(workflowPath);
+        try
+        {
+            var loader = new WorkflowLoader();
+            var definition = await loader.LoadAsync(workflowPath);
 
-        Assert.Equal("echo setup\n", definition.Runtime.Hooks.AfterCreate);
-        Assert.Equal("echo before\n", definition.Runtime.Hooks.BeforeRun);
-        Assert.Equal("echo after\n", definition.Runtime.Hooks.AfterRun);
-        Assert.Equal("echo cleanup\n", definition.Runtime.Hooks.BeforeRemove);
-        Assert.Equal(120000, definition.Runtime.Hooks.TimeoutMs);
-
-        File.Delete(workflowPath);
+            Assert.Equal("echo setup\n", definition.Runtime.Hooks.AfterCreate);
+            Assert.Equal("echo before\n", definition.Runtime.Hooks.BeforeRun);
+            Assert.Equal("echo after\n", definition.Runtime.Hooks.AfterRun);
+            Assert.Equal("echo cleanup\n", definition.Runtime.Hooks.BeforeRemove);
+            Assert.Equal(120000, definition.Runtime.Hooks.TimeoutMs);
+        }
+        finally
+        {
+            File.Delete(workflowPath);
+        }
     }
 
     [Fact]
-    public async Task LoadAsync_ShouldRejectInvalidCodexTimeout()
+    public async Task LoadAsync_ShouldRejectInvalidTurnTimeout()
     {
-        var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+        var workflowPath = CreateWorkflowPath();
         await File.WriteAllTextAsync(workflowPath, """
             ---
             tracker:
@@ -183,22 +315,27 @@ public sealed class WorkflowLoaderTests
               owner: released
               repo: symphony
             codex:
-              timeout_ms: 0
+              turn_timeout_ms: 0
             ---
             Prompt body.
             """);
 
-        var loader = new WorkflowLoader();
-        var ex = await Assert.ThrowsAsync<WorkflowLoadException>(() => loader.LoadAsync(workflowPath));
-        Assert.Equal("invalid_codex_timeout", ex.Code);
-
-        File.Delete(workflowPath);
+        try
+        {
+            var loader = new WorkflowLoader();
+            var ex = await Assert.ThrowsAsync<WorkflowLoadException>(() => loader.LoadAsync(workflowPath));
+            Assert.Equal("invalid_codex_turn_timeout", ex.Code);
+        }
+        finally
+        {
+            File.Delete(workflowPath);
+        }
     }
 
     [Fact]
     public async Task LoadAsync_ShouldRejectInvalidCodexReadTimeout()
     {
-        var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+        var workflowPath = CreateWorkflowPath();
         await File.WriteAllTextAsync(workflowPath, """
             ---
             tracker:
@@ -212,17 +349,22 @@ public sealed class WorkflowLoaderTests
             Prompt body.
             """);
 
-        var loader = new WorkflowLoader();
-        var ex = await Assert.ThrowsAsync<WorkflowLoadException>(() => loader.LoadAsync(workflowPath));
-        Assert.Equal("invalid_codex_read_timeout", ex.Code);
-
-        File.Delete(workflowPath);
+        try
+        {
+            var loader = new WorkflowLoader();
+            var ex = await Assert.ThrowsAsync<WorkflowLoadException>(() => loader.LoadAsync(workflowPath));
+            Assert.Equal("invalid_codex_read_timeout", ex.Code);
+        }
+        finally
+        {
+            File.Delete(workflowPath);
+        }
     }
 
     [Fact]
-    public async Task LoadAsync_ShouldRejectInvalidHooksTimeout()
+    public async Task LoadAsync_ShouldFallbackInvalidHooksTimeoutToDefault()
     {
-        var workflowPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+        var workflowPath = CreateWorkflowPath();
         await File.WriteAllTextAsync(workflowPath, """
             ---
             tracker:
@@ -236,11 +378,30 @@ public sealed class WorkflowLoaderTests
             Prompt body.
             """);
 
-        var loader = new WorkflowLoader();
-        var ex = await Assert.ThrowsAsync<WorkflowLoadException>(() => loader.LoadAsync(workflowPath));
-        Assert.Equal("invalid_hooks_timeout", ex.Code);
+        try
+        {
+            var loader = new WorkflowLoader();
+            var definition = await loader.LoadAsync(workflowPath);
+            Assert.Equal(60_000, definition.Runtime.Hooks.TimeoutMs);
+        }
+        finally
+        {
+            File.Delete(workflowPath);
+        }
+    }
 
-        File.Delete(workflowPath);
+    private static string CreateWorkflowPath()
+    {
+        return Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
+    }
+
+    private static WorkflowDefinitionProvider CreateProvider(string workflowPath)
+    {
+        return new WorkflowDefinitionProvider(
+            new WorkflowLoader(),
+            Options.Create(new WorkflowLoaderOptions { Path = workflowPath }),
+            new TestHostEnvironment(Path.GetTempPath()),
+            NullLogger<WorkflowDefinitionProvider>.Instance);
     }
 
     private sealed class TestHostEnvironment(string contentRootPath) : IHostEnvironment
