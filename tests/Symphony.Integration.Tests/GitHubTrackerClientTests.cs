@@ -111,19 +111,7 @@ public sealed class GitHubTrackerClientTests
                         "createdAt": "2026-03-05T00:00:00Z",
                         "updatedAt": "2026-03-05T01:00:00Z",
                         "milestone": null,
-                        "labels": { "nodes": [] },
-                        "closedByPullRequestsReferences": {
-                          "nodes": [
-                            {
-                              "id": "PR_1",
-                              "number": 501,
-                              "state": "OPEN",
-                              "url": "https://example/pr/1",
-                              "headRefName": "feature/1",
-                              "baseRefName": "main"
-                            }
-                          ]
-                        }
+                        "labels": { "nodes": [] }
                       }
                     ]
                   }
@@ -132,7 +120,8 @@ public sealed class GitHubTrackerClientTests
             }
             """;
 
-        using var httpClient = new HttpClient(new StaticJsonHandler(payload))
+        var handler = new CapturingJsonHandler(payload);
+        using var httpClient = new HttpClient(handler)
         {
             BaseAddress = new Uri("https://api.github.com/graphql")
         };
@@ -151,6 +140,8 @@ public sealed class GitHubTrackerClientTests
         var issue = Assert.Single(issues);
         Assert.Empty(issue.PullRequests);
         Assert.Null(issue.BranchName);
+        Assert.Contains("@include(if: $includePullRequests)", handler.RequestBody, StringComparison.Ordinal);
+        Assert.Contains("\"includePullRequests\":false", handler.RequestBody, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]
@@ -339,6 +330,23 @@ public sealed class GitHubTrackerClientTests
                 Content = new StringContent(json, Encoding.UTF8, "application/json")
             };
             return Task.FromResult(response);
+        }
+    }
+
+    private sealed class CapturingJsonHandler(string json) : HttpMessageHandler
+    {
+        public string RequestBody { get; private set; } = string.Empty;
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestBody = request.Content is null
+                ? string.Empty
+                : await request.Content.ReadAsStringAsync(cancellationToken);
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
         }
     }
 }

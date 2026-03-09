@@ -155,6 +155,24 @@ public sealed class WorkflowLoaderTests
     }
 
     [Fact]
+    public async Task Provider_ShouldFailWhenConfiguredWorkflowPathEnvironmentVariableIsMissing()
+    {
+        var missingPathEnvVar = $"SYMPHONY_WORKFLOW_PATH_{Guid.NewGuid():N}";
+        Environment.SetEnvironmentVariable(missingPathEnvVar, null);
+
+        try
+        {
+            var provider = CreateProvider($"${missingPathEnvVar}");
+            var ex = await Assert.ThrowsAsync<WorkflowLoadException>(() => provider.GetCurrentAsync());
+            Assert.Equal("missing_workflow_file", ex.Code);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(missingPathEnvVar, null);
+        }
+    }
+
+    [Fact]
     public async Task LoadAsync_ShouldParseExtendedWorkflowSettings()
     {
         var workflowPath = CreateWorkflowPath();

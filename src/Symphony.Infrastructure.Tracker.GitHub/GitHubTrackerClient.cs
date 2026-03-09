@@ -9,7 +9,7 @@ namespace Symphony.Infrastructure.Tracker.GitHub;
 public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHubTrackerClient
 {
     private const string GraphQlIssuesQuery = """
-        query($owner: String!, $repo: String!, $states: [IssueState!], $labels: [String!], $first: Int!, $after: String) {
+        query($owner: String!, $repo: String!, $states: [IssueState!], $labels: [String!], $first: Int!, $after: String, $includePullRequests: Boolean!) {
           repository(owner: $owner, name: $repo) {
             issues(states: $states, labels: $labels, first: $first, after: $after, orderBy: { field: CREATED_AT, direction: ASC }) {
               pageInfo {
@@ -34,7 +34,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
                     name
                   }
                 }
-                closedByPullRequestsReferences(first: 10) {
+                closedByPullRequestsReferences(first: 10) @include(if: $includePullRequests) {
                   nodes {
                     id
                     number
@@ -219,6 +219,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
                     repo = query.Repo,
                     states = issueStates,
                     labels = applyCandidateFilters && query.Labels.Count != 0 ? query.Labels : null,
+                    includePullRequests = query.IncludePullRequests,
                     first = query.PageSize <= 0 ? 50 : query.PageSize,
                     after = cursor
                 }
@@ -302,7 +303,11 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var pullRequests = includePullRequests
+        var pullRequests = includePullRequests &&
+                           issueNode.TryGetProperty("closedByPullRequestsReferences", out var pullRequestReferencesNode) &&
+                           pullRequestReferencesNode.ValueKind != JsonValueKind.Null &&
+                           pullRequestReferencesNode.TryGetProperty("nodes", out var pullRequestNodes) &&
+                           pullRequestNodes.ValueKind == JsonValueKind.Array
             ? issueNode
                 .GetProperty("closedByPullRequestsReferences")
                 .GetProperty("nodes")

@@ -12,6 +12,9 @@ public sealed class WorkflowDefinitionProvider(
     IHostEnvironment hostEnvironment,
     ILogger<WorkflowDefinitionProvider> logger) : IWorkflowDefinitionProvider, IDisposable
 {
+    private static readonly StringComparison PathComparison = OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly object _watcherLock = new();
     private WorkflowDefinition? _lastKnownGood;
@@ -81,7 +84,7 @@ public sealed class WorkflowDefinitionProvider(
     {
         lock (_watcherLock)
         {
-            if (string.Equals(_watchedPath, path, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(_watchedPath, path, PathComparison))
             {
                 return;
             }
@@ -129,7 +132,8 @@ public sealed class WorkflowDefinitionProvider(
 
     private static string ResolveWorkflowPath(string configuredPath, string contentRootPath)
     {
-        if (string.IsNullOrWhiteSpace(configuredPath))
+        var useDefaultPath = string.IsNullOrWhiteSpace(configuredPath);
+        if (useDefaultPath)
         {
             configuredPath = "WORKFLOW.md";
         }
@@ -137,6 +141,13 @@ public sealed class WorkflowDefinitionProvider(
         var resolvedPath = WorkflowValueResolver.ResolvePathLikeValue(configuredPath);
         if (string.IsNullOrWhiteSpace(resolvedPath))
         {
+            if (!useDefaultPath && configuredPath.TrimStart().StartsWith('$'))
+            {
+                throw new WorkflowLoadException(
+                    "missing_workflow_file",
+                    $"Workflow path environment reference '{configuredPath}' did not resolve to a value.");
+            }
+
             resolvedPath = "WORKFLOW.md";
         }
 
