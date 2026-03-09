@@ -322,18 +322,30 @@ internal static class SymphonyHostApplication
                     continue;
                 }
 
-                if (!current.StartsWith("-", StringComparison.Ordinal) && workflowPath is null)
+                if (current.StartsWith("-", StringComparison.Ordinal))
+                {
+                    remainingArgs.Add(current);
+
+                    if (index + 1 < args.Count)
+                    {
+                        var next = args[index + 1];
+                        if (!next.StartsWith("-", StringComparison.Ordinal))
+                        {
+                            remainingArgs.Add(next);
+                            index++;
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (workflowPath is null)
                 {
                     workflowPath = current;
                     continue;
                 }
 
-                if (!current.StartsWith("-", StringComparison.Ordinal))
-                {
-                    throw new HostCommandLineException("Only one positional workflow path may be provided.");
-                }
-
-                remainingArgs.Add(current);
+                throw new HostCommandLineException("Only one positional workflow path may be provided.");
             }
 
             return new HostCommandLineOptions(remainingArgs.ToArray(), workflowPath, port);

@@ -101,6 +101,45 @@ public sealed class HostLifecycleTests
     }
 
     [Fact]
+    public async Task RunCliAsync_ShouldPreserveUnknownOptionValuePairsBeforeWorkflowPath()
+    {
+        var tempDirectory = CreateTempDirectory();
+        var workflowPath = Path.Combine(tempDirectory, "environment-workflow.md");
+        var dbPath = Path.Combine(tempDirectory, "environment-workflow.db");
+        var stderr = new StringWriter();
+        var trackerClient = new FakeGitHubTrackerClient();
+        string? loadedWorkflowPath = null;
+
+        await File.WriteAllTextAsync(workflowPath, CreateWorkflowContent(serverPort: 0));
+
+        try
+        {
+            var exitCode = await SymphonyHostApplication.RunCliAsync(
+                ["--environment", "Development", workflowPath],
+                stderr,
+                configureBuilder: builder => AddTestConfiguration(builder, dbPath),
+                configureServices: services => services.AddSingleton<IGitHubTrackerClient>(trackerClient),
+                runApplicationAsync: async (app, cancellationToken) =>
+                {
+                    await app.StartAsync(cancellationToken);
+                    loadedWorkflowPath = await GetLoadedWorkflowPathAsync(app, cancellationToken);
+                    await app.StopAsync(cancellationToken);
+                });
+
+            Assert.Equal(0, exitCode);
+            Assert.Equal(Path.GetFullPath(workflowPath), loadedWorkflowPath);
+            Assert.Equal(string.Empty, stderr.ToString());
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            File.Delete(workflowPath);
+            File.Delete(dbPath);
+            Directory.Delete(tempDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunCliAsync_ShouldReturnNonZeroWhenExplicitWorkflowPathIsMissing()
     {
         var tempDirectory = CreateTempDirectory();
