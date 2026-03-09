@@ -22,6 +22,21 @@ public sealed class OrchestrationTickService(
     public async Task RunStartupCleanupAsync(CancellationToken cancellationToken)
     {
         var workflowDefinition = await workflowDefinitionProvider.GetCurrentAsync(cancellationToken);
+        string apiKey;
+        try
+        {
+            apiKey = WorkflowDispatchPreflightValidator.ValidateAndResolveApiKey(workflowDefinition);
+        }
+        catch (WorkflowLoadException ex)
+        {
+            logger.LogWarning(
+                ex,
+                "Skipping startup terminal cleanup because workflow preflight validation failed with code {Code} for {WorkflowPath}.",
+                ex.Code,
+                workflowDefinition.SourcePath);
+            return;
+        }
+
         var instanceId = ResolveInstanceId(orchestrationOptions.Value);
         var leaseName = string.IsNullOrWhiteSpace(orchestrationOptions.Value.LeaseName)
             ? "poll-dispatch"
@@ -45,15 +60,6 @@ public sealed class OrchestrationTickService(
 
         try
         {
-            var apiKey = ResolveApiKey(workflowDefinition.Runtime.Tracker.ApiKey);
-            if (string.IsNullOrWhiteSpace(apiKey))
-            {
-                logger.LogWarning(
-                    "Skipping startup terminal cleanup. tracker.api_key is missing after environment resolution for workflow {WorkflowPath}.",
-                    workflowDefinition.SourcePath);
-                return;
-            }
-
             var terminalStates = workflowDefinition.Runtime.Tracker.TerminalStates;
             if (terminalStates.Count == 0)
             {
@@ -68,7 +74,8 @@ public sealed class OrchestrationTickService(
                 workflowDefinition.Runtime.Tracker.Repo,
                 ActiveStates: terminalStates,
                 Labels: [],
-                Milestone: null);
+                Milestone: null,
+                IncludePullRequests: workflowDefinition.Runtime.Tracker.IncludePullRequests);
 
             IReadOnlyList<NormalizedIssue> terminalIssues;
             try
@@ -139,6 +146,22 @@ public sealed class OrchestrationTickService(
     public async Task<int?> RunTickAsync(CancellationToken cancellationToken)
     {
         var workflowDefinition = await workflowDefinitionProvider.GetCurrentAsync(cancellationToken);
+        var pollIntervalMs = workflowDefinition.Runtime.Polling.IntervalMs;
+        string apiKey;
+        try
+        {
+            apiKey = WorkflowDispatchPreflightValidator.ValidateAndResolveApiKey(workflowDefinition);
+        }
+        catch (WorkflowLoadException ex)
+        {
+            logger.LogError(
+                ex,
+                "Skipping dispatch for workflow {WorkflowPath} because preflight validation failed with code {Code}.",
+                workflowDefinition.SourcePath,
+                ex.Code);
+            return pollIntervalMs;
+        }
+
         var instanceId = ResolveInstanceId(orchestrationOptions.Value);
         var leaseName = string.IsNullOrWhiteSpace(orchestrationOptions.Value.LeaseName)
             ? "poll-dispatch"
@@ -157,16 +180,7 @@ public sealed class OrchestrationTickService(
                 "Skipping tick because lease '{LeaseName}' is owned by another instance. InstanceId={InstanceId}",
                 leaseName,
                 instanceId);
-            return workflowDefinition.Runtime.Polling.IntervalMs;
-        }
-
-        var apiKey = ResolveApiKey(workflowDefinition.Runtime.Tracker.ApiKey);
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            logger.LogWarning(
-                "Skipping tracker poll. tracker.api_key is missing after environment resolution for workflow {WorkflowPath}.",
-                workflowDefinition.SourcePath);
-            return workflowDefinition.Runtime.Polling.IntervalMs;
+            return pollIntervalMs;
         }
 
         var query = new TrackerQuery(
@@ -176,7 +190,8 @@ public sealed class OrchestrationTickService(
             workflowDefinition.Runtime.Tracker.Repo,
             workflowDefinition.Runtime.Tracker.ActiveStates,
             workflowDefinition.Runtime.Tracker.Labels,
-            workflowDefinition.Runtime.Tracker.Milestone);
+            workflowDefinition.Runtime.Tracker.Milestone,
+            workflowDefinition.Runtime.Tracker.IncludePullRequests);
 
         var issues = await trackerClient.FetchCandidateIssuesAsync(query, cancellationToken);
         logger.LogInformation(
@@ -280,7 +295,7 @@ public sealed class OrchestrationTickService(
                             workspace.WorkspacePath,
                             prompt,
                             workflowDefinition.Runtime.Codex.Command,
-                            workflowDefinition.Runtime.Codex.TimeoutMs,
+                            workflowDefinition.Runtime.Codex.TurnTimeoutMs,
                             workflowDefinition.Runtime.Codex.ApprovalPolicy,
                             workflowDefinition.Runtime.Codex.ThreadSandbox,
                             workflowDefinition.Runtime.Codex.TurnSandboxPolicy,
@@ -361,7 +376,7 @@ public sealed class OrchestrationTickService(
             }
         }
 
-        return workflowDefinition.Runtime.Polling.IntervalMs;
+        return pollIntervalMs;
     }
 
     private static string ResolveInstanceId(OrchestrationOptions options)
@@ -372,27 +387,6 @@ public sealed class OrchestrationTickService(
         }
 
         return $"{Environment.MachineName}-{Environment.ProcessId}";
-    }
-
-    private static string? ResolveApiKey(string rawApiKey)
-    {
-        if (string.IsNullOrWhiteSpace(rawApiKey))
-        {
-            return null;
-        }
-
-        if (!rawApiKey.StartsWith('$'))
-        {
-            return rawApiKey;
-        }
-
-        var variableName = rawApiKey[1..].Trim();
-        if (string.IsNullOrWhiteSpace(variableName))
-        {
-            return null;
-        }
-
-        return Environment.GetEnvironmentVariable(variableName);
     }
 
     private static string ResolveRemoteUrl(string? configuredRemoteUrl, string owner, string repo)

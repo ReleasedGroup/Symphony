@@ -15,13 +15,18 @@ public sealed record WorkflowTrackerSettings(
     string Owner,
     string Repo,
     string? Milestone,
+    bool IncludePullRequests,
     IReadOnlyList<string> Labels,
     IReadOnlyList<string> ActiveStates,
     IReadOnlyList<string> TerminalStates);
 
 public sealed record WorkflowPollingSettings(int IntervalMs);
 
-public sealed record WorkflowAgentSettings(int MaxConcurrentAgents);
+public sealed record WorkflowAgentSettings(
+    int MaxConcurrentAgents,
+    int MaxTurns,
+    int MaxRetryBackoffMs,
+    IReadOnlyDictionary<string, int> MaxConcurrentAgentsByState);
 
 public sealed record WorkflowWorkspaceSettings(
     string Root,
@@ -39,8 +44,9 @@ public sealed record WorkflowHooksSettings(
 
 public sealed record WorkflowCodexSettings(
     string Command,
-    int TimeoutMs,
+    int TurnTimeoutMs,
     string ApprovalPolicy,
     string ThreadSandbox,
     string TurnSandboxPolicy,
-    int ReadTimeoutMs);
+    int ReadTimeoutMs,
+    int StallTimeoutMs);

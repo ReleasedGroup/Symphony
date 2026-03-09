@@ -38,11 +38,16 @@ public sealed class WorkflowPromptRendererTests
                 Owner: "released",
                 Repo: "symphony",
                 Milestone: null,
+                IncludePullRequests: true,
                 Labels: [],
                 ActiveStates: ["Open"],
                 TerminalStates: ["Closed"]),
             new WorkflowPollingSettings(600000),
-            new WorkflowAgentSettings(5),
+            new WorkflowAgentSettings(
+                MaxConcurrentAgents: 5,
+                MaxTurns: 20,
+                MaxRetryBackoffMs: 300_000,
+                MaxConcurrentAgentsByState: new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)),
             new WorkflowWorkspaceSettings(
                 Root: "./workspaces",
                 SharedClonePath: "./workspaces/repo",
@@ -57,11 +62,12 @@ public sealed class WorkflowPromptRendererTests
                 TimeoutMs: 60_000),
             new WorkflowCodexSettings(
                 Command: "codex app-server",
-                TimeoutMs: 3600000,
+                TurnTimeoutMs: 3600000,
                 ApprovalPolicy: "never",
                 ThreadSandbox: "danger-full-access",
                 TurnSandboxPolicy: "danger-full-access",
-                ReadTimeoutMs: 5000));
+                ReadTimeoutMs: 5000,
+                StallTimeoutMs: 300_000));
 
         return new WorkflowDefinition(
             Config: new Dictionary<string, object?>(),

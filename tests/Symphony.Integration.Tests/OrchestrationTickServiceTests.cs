@@ -176,6 +176,35 @@ public sealed class OrchestrationTickServiceTests
     }
 
     [Fact]
+    public async Task RunTickAsync_ShouldSkipDispatchWhenWorkflowPreflightValidationFails()
+    {
+        var workflow = BuildWorkflowDefinition(maxConcurrentAgents: 1, apiKey: "$SYMPHONY_MISSING_API_KEY");
+        var tracker = new FakeTrackerClient(
+        [
+            BuildIssue("issue-1", "#1", priority: 1, createdAt: DateTimeOffset.UtcNow)
+        ]);
+        var coordinationStore = new FakeCoordinationStore(leaseGranted: true);
+        var workspaceManager = new FakeWorkspaceManager();
+        var hookRunner = new FakeWorkspaceHookRunner();
+        var agentRunner = new FakeAgentRunner();
+
+        var service = CreateService(
+            workflow,
+            tracker,
+            coordinationStore,
+            workspaceManager,
+            hookRunner,
+            agentRunner);
+
+        var interval = await service.RunTickAsync(CancellationToken.None);
+
+        Assert.Equal(workflow.Runtime.Polling.IntervalMs, interval);
+        Assert.False(tracker.FetchCandidateIssuesCalled);
+        Assert.Empty(agentRunner.RunIssueIds);
+        Assert.Empty(coordinationStore.ClaimAttempts);
+    }
+
+    [Fact]
     public async Task RunTickAsync_ShouldRunAfterCreateBeforeRunAndAfterRunHooks()
     {
         var workflow = BuildWorkflowDefinition(
@@ -439,21 +468,30 @@ public sealed class OrchestrationTickServiceTests
             NullLogger<OrchestrationTickService>.Instance);
     }
 
-    private static WorkflowDefinition BuildWorkflowDefinition(int maxConcurrentAgents, WorkflowHooksSettings? hooks = null)
+    private static WorkflowDefinition BuildWorkflowDefinition(
+        int maxConcurrentAgents,
+        WorkflowHooksSettings? hooks = null,
+        string apiKey = "test-token",
+        bool includePullRequests = true)
     {
         var runtime = new WorkflowRuntimeSettings(
             new WorkflowTrackerSettings(
                 Kind: "github",
                 Endpoint: "https://api.github.com/graphql",
-                ApiKey: "test-token",
+                ApiKey: apiKey,
                 Owner: "released",
                 Repo: "symphony",
                 Milestone: null,
+                IncludePullRequests: includePullRequests,
                 Labels: [],
                 ActiveStates: ["Open"],
                 TerminalStates: ["Closed"]),
             new WorkflowPollingSettings(600_000),
-            new WorkflowAgentSettings(maxConcurrentAgents),
+            new WorkflowAgentSettings(
+                MaxConcurrentAgents: maxConcurrentAgents,
+                MaxTurns: 20,
+                MaxRetryBackoffMs: 300_000,
+                MaxConcurrentAgentsByState: new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)),
             new WorkflowWorkspaceSettings(
                 Root: "./workspaces",
                 SharedClonePath: "./workspaces/repo",
@@ -468,11 +506,12 @@ public sealed class OrchestrationTickServiceTests
                 TimeoutMs: 60_000),
             new WorkflowCodexSettings(
                 Command: "echo ok",
-                TimeoutMs: 30_000,
+                TurnTimeoutMs: 30_000,
                 ApprovalPolicy: "never",
                 ThreadSandbox: "danger-full-access",
                 TurnSandboxPolicy: "danger-full-access",
-                ReadTimeoutMs: 5_000));
+                ReadTimeoutMs: 5_000,
+                StallTimeoutMs: 300_000));
 
         return new WorkflowDefinition(
             Config: new Dictionary<string, object?>(),
@@ -527,6 +566,7 @@ public sealed class OrchestrationTickServiceTests
             ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             : new Dictionary<string, string>(issueStatesById, StringComparer.OrdinalIgnoreCase);
 
+        public bool FetchCandidateIssuesCalled { get; private set; }
         public bool FetchByStatesCalled { get; private set; }
         public bool FetchByIdsCalled { get; private set; }
         public List<string> FetchedIssueIds { get; } = [];
@@ -535,6 +575,7 @@ public sealed class OrchestrationTickServiceTests
             TrackerQuery query,
             CancellationToken cancellationToken = default)
         {
+            FetchCandidateIssuesCalled = true;
             return Task.FromResult(issues);
         }
 

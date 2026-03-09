@@ -10,32 +10,29 @@ public sealed class WorkflowDefinitionProvider(
     WorkflowLoader loader,
     IOptions<WorkflowLoaderOptions> options,
     IHostEnvironment hostEnvironment,
-    ILogger<WorkflowDefinitionProvider> logger) : IWorkflowDefinitionProvider
+    ILogger<WorkflowDefinitionProvider> logger) : IWorkflowDefinitionProvider, IDisposable
 {
+    private static readonly StringComparison PathComparison = OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
     private readonly SemaphoreSlim _lock = new(1, 1);
+    private readonly object _watcherLock = new();
     private WorkflowDefinition? _lastKnownGood;
-    private DateTimeOffset _lastLoadedWriteTimeUtc;
+    private WorkflowFileStamp _lastProcessedStamp;
+    private FileSystemWatcher? _watcher;
+    private string? _watchedPath;
+    private volatile bool _reloadRequested = true;
 
     public async Task<WorkflowDefinition> GetCurrentAsync(CancellationToken cancellationToken = default)
     {
         var path = ResolveWorkflowPath(options.Value.Path, hostEnvironment.ContentRootPath);
-        var writeTimeUtc = File.Exists(path)
-            ? File.GetLastWriteTimeUtc(path)
-            : DateTime.MinValue;
-
-        if (_lastKnownGood is not null && writeTimeUtc <= _lastLoadedWriteTimeUtc)
-        {
-            return _lastKnownGood;
-        }
+        EnsureChangeWatcher(path);
 
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            writeTimeUtc = File.Exists(path)
-                ? File.GetLastWriteTimeUtc(path)
-                : DateTime.MinValue;
-
-            if (_lastKnownGood is not null && writeTimeUtc <= _lastLoadedWriteTimeUtc)
+            var currentStamp = GetWorkflowFileStamp(path);
+            if (_lastKnownGood is not null && !_reloadRequested && _lastProcessedStamp == currentStamp)
             {
                 return _lastKnownGood;
             }
@@ -44,12 +41,16 @@ public sealed class WorkflowDefinitionProvider(
             {
                 var loaded = await loader.LoadAsync(path, cancellationToken);
                 _lastKnownGood = loaded;
-                _lastLoadedWriteTimeUtc = writeTimeUtc;
+                _lastProcessedStamp = currentStamp;
+                _reloadRequested = false;
                 logger.LogInformation("Loaded workflow from {WorkflowPath} at {LoadedAtUtc}.", path, loaded.LoadedAtUtc);
                 return loaded;
             }
             catch (WorkflowLoadException ex)
             {
+                _lastProcessedStamp = currentStamp;
+                _reloadRequested = false;
+
                 if (_lastKnownGood is not null)
                 {
                     logger.LogError(
@@ -69,18 +70,110 @@ public sealed class WorkflowDefinitionProvider(
         }
     }
 
+    public void Dispose()
+    {
+        lock (_watcherLock)
+        {
+            _watcher?.Dispose();
+        }
+
+        _lock.Dispose();
+    }
+
+    private void EnsureChangeWatcher(string path)
+    {
+        lock (_watcherLock)
+        {
+            if (string.Equals(_watchedPath, path, PathComparison))
+            {
+                return;
+            }
+
+            _watcher?.Dispose();
+            _watcher = null;
+            _watchedPath = path;
+            _reloadRequested = true;
+
+            var directory = Path.GetDirectoryName(path);
+            var fileName = Path.GetFileName(path);
+            if (string.IsNullOrWhiteSpace(directory) || string.IsNullOrWhiteSpace(fileName) || !Directory.Exists(directory))
+            {
+                return;
+            }
+
+            var watcher = new FileSystemWatcher(directory, fileName)
+            {
+                NotifyFilter = NotifyFilters.CreationTime | NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
+                IncludeSubdirectories = false,
+                EnableRaisingEvents = true
+            };
+
+            watcher.Changed += OnWorkflowFileChanged;
+            watcher.Created += OnWorkflowFileChanged;
+            watcher.Deleted += OnWorkflowFileChanged;
+            watcher.Renamed += OnWorkflowFileRenamed;
+            _watcher = watcher;
+        }
+    }
+
+    private static WorkflowFileStamp GetWorkflowFileStamp(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return new WorkflowFileStamp(Exists: false, LastWriteTimeUtc: DateTimeOffset.MinValue, Length: -1);
+        }
+
+        var fileInfo = new FileInfo(path);
+        return new WorkflowFileStamp(
+            Exists: true,
+            LastWriteTimeUtc: fileInfo.LastWriteTimeUtc,
+            Length: fileInfo.Length);
+    }
+
     private static string ResolveWorkflowPath(string configuredPath, string contentRootPath)
     {
-        if (string.IsNullOrWhiteSpace(configuredPath))
+        var useDefaultPath = string.IsNullOrWhiteSpace(configuredPath);
+        if (useDefaultPath)
         {
             configuredPath = "WORKFLOW.md";
         }
 
-        if (Path.IsPathRooted(configuredPath))
+        var resolvedPath = WorkflowValueResolver.ResolvePathLikeValue(configuredPath);
+        if (string.IsNullOrWhiteSpace(resolvedPath))
         {
-            return configuredPath;
+            if (!useDefaultPath && configuredPath.TrimStart().StartsWith('$'))
+            {
+                throw new WorkflowLoadException(
+                    "missing_workflow_file",
+                    $"Workflow path environment reference '{configuredPath}' did not resolve to a value.");
+            }
+
+            resolvedPath = "WORKFLOW.md";
         }
 
-        return Path.GetFullPath(Path.Combine(contentRootPath, configuredPath));
+        if (Path.IsPathRooted(resolvedPath))
+        {
+            return Path.GetFullPath(resolvedPath);
+        }
+
+        return Path.GetFullPath(Path.Combine(contentRootPath, resolvedPath));
     }
+
+    private void OnWorkflowFileChanged(object sender, FileSystemEventArgs args)
+    {
+        _reloadRequested = true;
+        logger.LogInformation(
+            "Detected workflow change for {WorkflowPath}. Reload will apply on the next access.",
+            _watchedPath ?? args.FullPath);
+    }
+
+    private void OnWorkflowFileRenamed(object sender, RenamedEventArgs args)
+    {
+        _reloadRequested = true;
+        logger.LogInformation(
+            "Detected workflow rename for {WorkflowPath}. Reload will apply on the next access.",
+            _watchedPath ?? args.FullPath);
+    }
+
+    private readonly record struct WorkflowFileStamp(bool Exists, DateTimeOffset LastWriteTimeUtc, long Length);
 }

@@ -8,4 +8,5 @@ public sealed record TrackerQuery(
     IReadOnlyList<string> ActiveStates,
     IReadOnlyList<string> Labels,
     string? Milestone,
+    bool IncludePullRequests = true,
     int PageSize = 50);

@@ -88,6 +88,62 @@ public sealed class GitHubTrackerClientTests
         Assert.Single(issue.PullRequests);
     }
 
+    [Fact]
+    public async Task FetchCandidateIssuesAsync_ShouldOmitPullRequestMetadataWhenDisabled()
+    {
+        const string payload = """
+            {
+              "data": {
+                "repository": {
+                  "issues": {
+                    "pageInfo": {
+                      "hasNextPage": false,
+                      "endCursor": null
+                    },
+                    "nodes": [
+                      {
+                        "id": "I_001",
+                        "number": 101,
+                        "title": "Issue one",
+                        "body": "Body one",
+                        "state": "OPEN",
+                        "url": "https://example/1",
+                        "createdAt": "2026-03-05T00:00:00Z",
+                        "updatedAt": "2026-03-05T01:00:00Z",
+                        "milestone": null,
+                        "labels": { "nodes": [] }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        var handler = new CapturingJsonHandler(payload);
+        using var httpClient = new HttpClient(handler)
+        {
+            BaseAddress = new Uri("https://api.github.com/graphql")
+        };
+
+        var client = new GitHubTrackerClient(httpClient);
+        var issues = await client.FetchCandidateIssuesAsync(new TrackerQuery(
+            Endpoint: "https://api.github.com/graphql",
+            ApiKey: "token",
+            Owner: "released",
+            Repo: "symphony",
+            ActiveStates: ["Open"],
+            Labels: [],
+            Milestone: null,
+            IncludePullRequests: false));
+
+        var issue = Assert.Single(issues);
+        Assert.Empty(issue.PullRequests);
+        Assert.Null(issue.BranchName);
+        Assert.Contains("@include(if: $includePullRequests)", handler.RequestBody, StringComparison.Ordinal);
+        Assert.Contains("\"includePullRequests\":false", handler.RequestBody, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData("Closed")]
     [InlineData("Done")]
@@ -274,6 +330,23 @@ public sealed class GitHubTrackerClientTests
                 Content = new StringContent(json, Encoding.UTF8, "application/json")
             };
             return Task.FromResult(response);
+        }
+    }
+
+    private sealed class CapturingJsonHandler(string json) : HttpMessageHandler
+    {
+        public string RequestBody { get; private set; } = string.Empty;
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestBody = request.Content is null
+                ? string.Empty
+                : await request.Content.ReadAsStringAsync(cancellationToken);
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
         }
     }
 }
