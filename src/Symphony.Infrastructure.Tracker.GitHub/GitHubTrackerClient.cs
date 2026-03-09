@@ -353,7 +353,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var state in activeStates)
         {
-            if (IsClosedState(state))
+            if (IssueStateMatcher.IsClosedState(state))
             {
                 result.Add("CLOSED");
             }
@@ -403,23 +403,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
 
     private static bool MatchesActiveState(string issueState, IReadOnlyList<string> configuredStates)
     {
-        if (configuredStates.Count == 0)
-        {
-            return issueState.Equals("Open", StringComparison.OrdinalIgnoreCase);
-        }
-
-        if (issueState.Equals("Closed", StringComparison.OrdinalIgnoreCase))
-        {
-            return configuredStates.Any(IsClosedState);
-        }
-
-        return configuredStates.Any(state => !IsClosedState(state));
-    }
-
-    private static bool IsClosedState(string state)
-    {
-        var normalized = state.Trim().ToLowerInvariant();
-        return normalized is "closed" or "done" or "resolved" or "completed";
+        return IssueStateMatcher.MatchesConfiguredActiveState(issueState, configuredStates);
     }
 
     private static int? InferPriority(IEnumerable<string> labels)

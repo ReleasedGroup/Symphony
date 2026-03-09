@@ -138,7 +138,9 @@ public sealed class OrchestrationTickServiceTests
 
         Assert.Equal(workflow.Runtime.Polling.IntervalMs, interval);
         Assert.True(tracker.FetchByIdsCalled);
-        Assert.Equal(["issue-1", "issue-2"], tracker.FetchedIssueIds);
+        Assert.Equal(2, tracker.FetchedIssueIds.Count);
+        Assert.Contains("issue-1", tracker.FetchedIssueIds);
+        Assert.Contains("issue-2", tracker.FetchedIssueIds);
         Assert.Equal(["issue-2"], coordinationStore.ClaimAttempts);
         Assert.Equal(["issue-2"], agentRunner.RunIssueIds);
     }

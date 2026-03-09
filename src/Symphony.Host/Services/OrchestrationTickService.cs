@@ -526,7 +526,7 @@ public sealed class OrchestrationTickService(
                     continue;
                 }
 
-                if (!MatchesConfiguredActiveState(refreshedState.State, activeStates))
+                if (!IssueStateMatcher.MatchesConfiguredActiveState(refreshedState.State, activeStates))
                 {
                     logger.LogDebug(
                         "Skipping candidate issue {IssueIdentifier} ({IssueId}) because refreshed state is {RefreshedState}.",
@@ -564,27 +564,6 @@ public sealed class OrchestrationTickService(
                 query.Repo);
             return candidates;
         }
-    }
-
-    private static bool MatchesConfiguredActiveState(string issueState, IReadOnlyList<string> configuredStates)
-    {
-        if (configuredStates.Count == 0)
-        {
-            return !IsClosedStateName(issueState);
-        }
-
-        if (IsClosedStateName(issueState))
-        {
-            return configuredStates.Any(IsClosedStateName);
-        }
-
-        return configuredStates.Any(state => !IsClosedStateName(state));
-    }
-
-    private static bool IsClosedStateName(string state)
-    {
-        var normalized = state.Trim().ToLowerInvariant();
-        return normalized is "closed" or "done" or "resolved" or "completed";
     }
 
     private static IEnumerable<NormalizedIssue> OrderIssuesForDispatch(IEnumerable<NormalizedIssue> issues)
