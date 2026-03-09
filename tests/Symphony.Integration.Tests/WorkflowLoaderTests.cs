@@ -1,5 +1,3 @@
-using Microsoft.Extensions.FileProviders;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Symphony.Core.Configuration;
@@ -46,6 +44,7 @@ public sealed class WorkflowLoaderTests
             Assert.Equal(20, definition.Runtime.Agent.MaxTurns);
             Assert.Equal(300_000, definition.Runtime.Agent.MaxRetryBackoffMs);
             Assert.Empty(definition.Runtime.Agent.MaxConcurrentAgentsByState);
+            Assert.Null(definition.Runtime.Server.Port);
             Assert.Equal("./workspaces", definition.Runtime.Workspace.Root);
             Assert.Equal("./workspaces/repo", definition.Runtime.Workspace.SharedClonePath);
             Assert.Equal("./workspaces/worktrees", definition.Runtime.Workspace.WorktreesRoot);
@@ -221,6 +220,7 @@ public sealed class WorkflowLoaderTests
             Assert.Equal(2, definition.Runtime.Agent.MaxConcurrentAgentsByState["open"]);
             Assert.Equal(4, definition.Runtime.Agent.MaxConcurrentAgentsByState["in progress"]);
             Assert.DoesNotContain("closed", definition.Runtime.Agent.MaxConcurrentAgentsByState.Keys, StringComparer.OrdinalIgnoreCase);
+            Assert.Null(definition.Runtime.Server.Port);
             Assert.Equal(workspaceRoot, definition.Runtime.Workspace.Root);
             Assert.Equal(
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "symphony-shared"),
@@ -351,6 +351,64 @@ public sealed class WorkflowLoaderTests
     }
 
     [Fact]
+    public async Task LoadAsync_ShouldParseServerPort()
+    {
+        var workflowPath = CreateWorkflowPath();
+        await File.WriteAllTextAsync(workflowPath, """
+            ---
+            tracker:
+              kind: github
+              api_key: test-token
+              owner: released
+              repo: symphony
+            server:
+              port: 0
+            ---
+            Prompt body.
+            """);
+
+        try
+        {
+            var loader = new WorkflowLoader();
+            var definition = await loader.LoadAsync(workflowPath);
+            Assert.Equal(0, definition.Runtime.Server.Port);
+        }
+        finally
+        {
+            File.Delete(workflowPath);
+        }
+    }
+
+    [Fact]
+    public async Task LoadAsync_ShouldRejectInvalidServerPort()
+    {
+        var workflowPath = CreateWorkflowPath();
+        await File.WriteAllTextAsync(workflowPath, """
+            ---
+            tracker:
+              kind: github
+              api_key: test-token
+              owner: released
+              repo: symphony
+            server:
+              port: -1
+            ---
+            Prompt body.
+            """);
+
+        try
+        {
+            var loader = new WorkflowLoader();
+            var ex = await Assert.ThrowsAsync<WorkflowLoadException>(() => loader.LoadAsync(workflowPath));
+            Assert.Equal("invalid_server_port", ex.Code);
+        }
+        finally
+        {
+            File.Delete(workflowPath);
+        }
+    }
+
+    [Fact]
     public async Task LoadAsync_ShouldRejectInvalidCodexReadTimeout()
     {
         var workflowPath = CreateWorkflowPath();
@@ -418,15 +476,6 @@ public sealed class WorkflowLoaderTests
         return new WorkflowDefinitionProvider(
             new WorkflowLoader(),
             Options.Create(new WorkflowLoaderOptions { Path = workflowPath }),
-            new TestHostEnvironment(Path.GetTempPath()),
             NullLogger<WorkflowDefinitionProvider>.Instance);
-    }
-
-    private sealed class TestHostEnvironment(string contentRootPath) : IHostEnvironment
-    {
-        public string EnvironmentName { get; set; } = "Development";
-        public string ApplicationName { get; set; } = "Symphony.Tests";
-        public string ContentRootPath { get; set; } = contentRootPath;
-        public IFileProvider ContentRootFileProvider { get; set; } = new PhysicalFileProvider(contentRootPath);
     }
 }

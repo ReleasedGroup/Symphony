@@ -10,9 +10,7 @@ public static class ServiceCollectionExtensions
     {
         services
             .AddOptions<WorkflowLoaderOptions>()
-            .Bind(configuration.GetSection(WorkflowLoaderOptions.SectionName))
-            .Validate(options => !string.IsNullOrWhiteSpace(options.Path), "Workflow:Path must be configured.")
-            .ValidateOnStart();
+            .Bind(configuration.GetSection(WorkflowLoaderOptions.SectionName));
 
         services.AddSingleton<WorkflowLoader>();
         services.AddSingleton<IWorkflowDefinitionProvider, WorkflowDefinitionProvider>();

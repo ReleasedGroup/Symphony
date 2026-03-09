@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Symphony.Host;
 
 namespace Symphony.Integration.Tests;
 
@@ -50,7 +51,7 @@ public sealed class ApiSmokeTests
     }
 
     [Fact]
-    public void HostStartup_ShouldFailFastWhenWorkflowApiKeyCannotBeResolved()
+    public async Task HostStartup_ShouldFailFastWhenWorkflowApiKeyCannotBeResolved()
     {
         var missingApiKeyEnvVar = $"SYMPHONY_MISSING_API_KEY_{Guid.NewGuid():N}";
         var workflowPath = CreateWorkflowPath($$"""
@@ -83,18 +84,36 @@ public sealed class ApiSmokeTests
             ---
             Prompt body.
             """);
+        var dbPath = Path.Combine(Path.GetTempPath(), $"symphony-int-{Guid.NewGuid():N}.db");
+        var stderr = new StringWriter();
 
         try
         {
             Environment.SetEnvironmentVariable(missingApiKeyEnvVar, null);
+            var exitCode = await SymphonyHostApplication.RunCliAsync(
+                [workflowPath],
+                stderr,
+                configureBuilder: builder =>
+                {
+                    builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["Persistence:ConnectionString"] = $"Data Source={dbPath};Cache=Shared;Mode=ReadWriteCreate"
+                    });
+                },
+                runApplicationAsync: static async (app, cancellationToken) =>
+                {
+                    await app.StartAsync(cancellationToken);
+                    await app.StopAsync(cancellationToken);
+                });
 
-            using var factory = CreateFactory(workflowPath);
-            var ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
-
-            Assert.Contains("tracker.api_key", ex.ToString(), StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(1, exitCode);
+            Assert.Contains("missing_tracker_api_key", stderr.ToString(), StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("tracker.api_key", stderr.ToString(), StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Delete(dbPath);
             File.Delete(workflowPath);
         }
     }

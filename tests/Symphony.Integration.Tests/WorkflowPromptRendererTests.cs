@@ -48,6 +48,7 @@ public sealed class WorkflowPromptRendererTests
                 MaxTurns: 20,
                 MaxRetryBackoffMs: 300_000,
                 MaxConcurrentAgentsByState: new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)),
+            new WorkflowServerSettings(Port: null),
             new WorkflowWorkspaceSettings(
                 Root: "./workspaces",
                 SharedClonePath: "./workspaces/repo",
