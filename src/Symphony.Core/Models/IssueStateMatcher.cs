@@ -10,7 +10,7 @@ public static class IssueStateMatcher
     /// </summary>
     public static bool IsClosedState(string state)
     {
-        var normalized = state.Trim().ToLowerInvariant();
+        var normalized = NormalizeState(state);
         return normalized is "closed" or "done" or "resolved" or "completed";
     }
 
@@ -19,16 +19,26 @@ public static class IssueStateMatcher
     /// </summary>
     public static bool MatchesConfiguredActiveState(string issueState, IReadOnlyList<string> configuredStates)
     {
-        if (configuredStates.Count == 0)
+        var normalizedIssueState = NormalizeState(issueState);
+        if (string.IsNullOrWhiteSpace(normalizedIssueState))
         {
-            return !IsClosedState(issueState);
+            return false;
         }
 
-        if (IsClosedState(issueState))
+        if (configuredStates.Count == 0)
+        {
+            return !IsClosedState(normalizedIssueState);
+        }
+
+        if (IsClosedState(normalizedIssueState))
         {
             return configuredStates.Any(IsClosedState);
         }
 
-        return configuredStates.Any(state => !IsClosedState(state));
+        return configuredStates.Any(state =>
+            !IsClosedState(state) &&
+            string.Equals(NormalizeState(state), normalizedIssueState, StringComparison.OrdinalIgnoreCase));
     }
+
+    private static string NormalizeState(string state) => state.Trim().ToLowerInvariant();
 }

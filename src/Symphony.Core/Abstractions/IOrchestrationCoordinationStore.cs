@@ -16,6 +16,7 @@ public interface IOrchestrationCoordinationStore
     Task<bool> TryClaimIssueAsync(
         string issueId,
         string issueIdentifier,
+        string leaseName,
         string instanceId,
         CancellationToken cancellationToken = default);
 

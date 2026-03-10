@@ -12,5 +12,6 @@ public sealed record NormalizedIssue(
     string? Milestone,
     IReadOnlyList<string> Labels,
     IReadOnlyList<PullRequestRef> PullRequests,
+    IReadOnlyList<BlockerRef> BlockedBy,
     DateTimeOffset? CreatedAt,
     DateTimeOffset? UpdatedAt);

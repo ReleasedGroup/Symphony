@@ -31,6 +31,13 @@ public sealed class GitHubTrackerClientTests
                         "updatedAt": "2026-03-05T01:00:00Z",
                         "milestone": { "title": "Sprint 1", "number": 1 },
                         "labels": { "nodes": [ { "name": "backend" }, { "name": "priority1" } ] },
+                        "linkedBranches": {
+                          "nodes": [
+                            {
+                              "ref": { "name": "feature/issue-101" }
+                            }
+                          ]
+                        },
                         "closedByPullRequestsReferences": {
                           "nodes": [
                             {
@@ -40,6 +47,15 @@ public sealed class GitHubTrackerClientTests
                               "url": "https://example/pr/1",
                               "headRefName": "feature/1",
                               "baseRefName": "main"
+                            }
+                          ]
+                        },
+                        "blockedBy": {
+                          "nodes": [
+                            {
+                              "id": "I_099",
+                              "number": 99,
+                              "state": "OPEN"
                             }
                           ]
                         }
@@ -55,7 +71,9 @@ public sealed class GitHubTrackerClientTests
                         "updatedAt": "2026-03-05T01:00:00Z",
                         "milestone": { "title": "Sprint 2", "number": 2 },
                         "labels": { "nodes": [ { "name": "frontend" } ] },
-                        "closedByPullRequestsReferences": { "nodes": [] }
+                        "linkedBranches": { "nodes": [] },
+                        "closedByPullRequestsReferences": { "nodes": [] },
+                        "blockedBy": { "nodes": [] }
                       }
                     ]
                   }
@@ -83,9 +101,18 @@ public sealed class GitHubTrackerClientTests
         Assert.Equal("#101", issue.Identifier);
         Assert.Equal("Issue one", issue.Title);
         Assert.Equal("Open", issue.State);
+        Assert.Equal("feature/issue-101", issue.BranchName);
         Assert.Equal("Sprint 1", issue.Milestone);
         Assert.Contains("backend", issue.Labels);
         Assert.Single(issue.PullRequests);
+        Assert.Collection(
+            issue.BlockedBy,
+            blocker =>
+            {
+                Assert.Equal("I_099", blocker.Id);
+                Assert.Equal("#99", blocker.Identifier);
+                Assert.Equal("Open", blocker.State);
+            });
     }
 
     [Fact]
@@ -111,7 +138,15 @@ public sealed class GitHubTrackerClientTests
                         "createdAt": "2026-03-05T00:00:00Z",
                         "updatedAt": "2026-03-05T01:00:00Z",
                         "milestone": null,
-                        "labels": { "nodes": [] }
+                        "labels": { "nodes": [] },
+                        "linkedBranches": {
+                          "nodes": [
+                            {
+                              "ref": { "name": "feature/linked-branch" }
+                            }
+                          ]
+                        },
+                        "blockedBy": { "nodes": [] }
                       }
                     ]
                   }
@@ -139,7 +174,7 @@ public sealed class GitHubTrackerClientTests
 
         var issue = Assert.Single(issues);
         Assert.Empty(issue.PullRequests);
-        Assert.Null(issue.BranchName);
+        Assert.Equal("feature/linked-branch", issue.BranchName);
         Assert.Contains("@include(if: $includePullRequests)", handler.RequestBody, StringComparison.Ordinal);
         Assert.Contains("\"includePullRequests\":false", handler.RequestBody, StringComparison.OrdinalIgnoreCase);
     }
@@ -172,7 +207,9 @@ public sealed class GitHubTrackerClientTests
                         "updatedAt": "2026-03-05T01:00:00Z",
                         "milestone": null,
                         "labels": { "nodes": [] },
-                        "closedByPullRequestsReferences": { "nodes": [] }
+                        "linkedBranches": { "nodes": [] },
+                        "closedByPullRequestsReferences": { "nodes": [] },
+                        "blockedBy": { "nodes": [] }
                       },
                       {
                         "id": "I_011",
@@ -185,7 +222,9 @@ public sealed class GitHubTrackerClientTests
                         "updatedAt": "2026-03-05T01:00:00Z",
                         "milestone": null,
                         "labels": { "nodes": [] },
-                        "closedByPullRequestsReferences": { "nodes": [] }
+                        "linkedBranches": { "nodes": [] },
+                        "closedByPullRequestsReferences": { "nodes": [] },
+                        "blockedBy": { "nodes": [] }
                       }
                     ]
                   }
@@ -241,7 +280,7 @@ public sealed class GitHubTrackerClientTests
         };
 
         var client = new GitHubTrackerClient(httpClient);
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var ex = await Assert.ThrowsAsync<GitHubTrackerException>(() =>
             client.FetchCandidateIssuesAsync(new TrackerQuery(
                 Endpoint: "https://api.github.com/graphql",
                 ApiKey: "token",
@@ -251,7 +290,7 @@ public sealed class GitHubTrackerClientTests
                 Labels: [],
                 Milestone: null)));
 
-        Assert.Contains("github_missing_end_cursor", ex.Message, StringComparison.Ordinal);
+        Assert.Equal("github_missing_end_cursor", ex.Code);
     }
 
     [Fact]
@@ -321,6 +360,117 @@ public sealed class GitHubTrackerClientTests
             });
     }
 
+    [Fact]
+    public async Task FetchIssuesByStatesAsync_ShouldReturnImmediatelyWhenStateFilterIsEmpty()
+    {
+        var handler = new CountingHandler();
+        using var httpClient = new HttpClient(handler)
+        {
+            BaseAddress = new Uri("https://api.github.com/graphql")
+        };
+
+        var client = new GitHubTrackerClient(httpClient);
+        var issues = await client.FetchIssuesByStatesAsync(
+            new TrackerQuery(
+                Endpoint: "https://api.github.com/graphql",
+                ApiKey: "token",
+                Owner: "released",
+                Repo: "symphony",
+                ActiveStates: ["Open"],
+                Labels: [],
+                Milestone: null),
+            states: []);
+
+        Assert.Empty(issues);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.BadGateway, "github_api_status")]
+    [InlineData(HttpStatusCode.Unauthorized, "github_api_status")]
+    public async Task FetchCandidateIssuesAsync_ShouldMapNonSuccessStatusCodes(HttpStatusCode statusCode, string expectedCode)
+    {
+        using var httpClient = new HttpClient(new StaticStatusCodeHandler(statusCode))
+        {
+            BaseAddress = new Uri("https://api.github.com/graphql")
+        };
+
+        var client = new GitHubTrackerClient(httpClient);
+        var ex = await Assert.ThrowsAsync<GitHubTrackerException>(() =>
+            client.FetchCandidateIssuesAsync(new TrackerQuery(
+                Endpoint: "https://api.github.com/graphql",
+                ApiKey: "token",
+                Owner: "released",
+                Repo: "symphony",
+                ActiveStates: ["Open"],
+                Labels: [],
+                Milestone: null)));
+
+        Assert.Equal(expectedCode, ex.Code);
+    }
+
+    [Fact]
+    public async Task FetchCandidateIssuesAsync_ShouldMapGraphQlErrors()
+    {
+        const string payload = """
+            {
+              "errors": [
+                { "message": "boom" }
+              ]
+            }
+            """;
+
+        using var httpClient = new HttpClient(new StaticJsonHandler(payload))
+        {
+            BaseAddress = new Uri("https://api.github.com/graphql")
+        };
+
+        var client = new GitHubTrackerClient(httpClient);
+        var ex = await Assert.ThrowsAsync<GitHubTrackerException>(() =>
+            client.FetchCandidateIssuesAsync(new TrackerQuery(
+                Endpoint: "https://api.github.com/graphql",
+                ApiKey: "token",
+                Owner: "released",
+                Repo: "symphony",
+                ActiveStates: ["Open"],
+                Labels: [],
+                Milestone: null)));
+
+        Assert.Equal("github_graphql_errors", ex.Code);
+    }
+
+    [Fact]
+    public async Task FetchCandidateIssuesAsync_ShouldMapMalformedPayloads()
+    {
+        const string payload = """
+            {
+              "data": {
+                "repository": {
+                  "issues": "not-an-object"
+                }
+              }
+            }
+            """;
+
+        using var httpClient = new HttpClient(new StaticJsonHandler(payload))
+        {
+            BaseAddress = new Uri("https://api.github.com/graphql")
+        };
+
+        var client = new GitHubTrackerClient(httpClient);
+        var ex = await Assert.ThrowsAsync<GitHubTrackerException>(() =>
+            client.FetchCandidateIssuesAsync(new TrackerQuery(
+                Endpoint: "https://api.github.com/graphql",
+                ApiKey: "token",
+                Owner: "released",
+                Repo: "symphony",
+                ActiveStates: ["Open"],
+                Labels: [],
+                Milestone: null)));
+
+        Assert.Equal("github_unknown_payload", ex.Code);
+    }
+
     private sealed class StaticJsonHandler(string json) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -347,6 +497,31 @@ public sealed class GitHubTrackerClientTests
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json")
             };
+        }
+    }
+
+    private sealed class CountingHandler : HttpMessageHandler
+    {
+        public int RequestCount { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{}", Encoding.UTF8, "application/json")
+            });
+        }
+    }
+
+    private sealed class StaticStatusCodeHandler(HttpStatusCode statusCode) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new HttpResponseMessage(statusCode)
+            {
+                Content = new StringContent(string.Empty, Encoding.UTF8, "application/json")
+            });
         }
     }
 }

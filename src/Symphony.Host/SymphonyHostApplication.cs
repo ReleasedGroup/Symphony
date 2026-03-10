@@ -105,6 +105,7 @@ internal static class SymphonyHostApplication
         services.AddSymphonyGitHubTrackerClient();
         services.AddSymphonyCodexAgentRunner();
         services.AddSymphonyWorkspaceServices();
+        services.AddSingleton<IIssueExecutionCoordinator, IssueExecutionCoordinator>();
         services.AddScoped<OrchestrationTickService>();
 
         services

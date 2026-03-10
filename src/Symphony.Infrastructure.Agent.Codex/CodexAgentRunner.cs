@@ -17,16 +17,17 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
 
     public Task<AgentRunResult> RunIssueAsync(
         AgentRunRequest request,
+        Func<AgentRunUpdate, CancellationToken, Task>? onUpdate = null,
         CancellationToken cancellationToken = default)
     {
         ValidateRequest(request);
 
         if (IsLikelyAppServerCommand(request.Command))
         {
-            return RunAppServerCommandAsync(request, cancellationToken);
+            return RunAppServerCommandAsync(request, onUpdate, cancellationToken);
         }
 
-        return RunShellCommandAsync(request, cancellationToken);
+        return RunShellCommandAsync(request, onUpdate, cancellationToken);
     }
 
     private static void ValidateRequest(AgentRunRequest request)
@@ -74,6 +75,7 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
 
     private async Task<AgentRunResult> RunShellCommandAsync(
         AgentRunRequest request,
+        Func<AgentRunUpdate, CancellationToken, Task>? onUpdate,
         CancellationToken cancellationToken)
     {
         var startInfo = BuildProcessStartInfo(request.Command, request.WorkspacePath);
@@ -102,6 +104,15 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         {
             throw new InvalidOperationException($"Failed to start command '{request.Command}'.");
         }
+
+        await ReportUpdateAsync(
+            onUpdate,
+            new AgentRunUpdate(
+                EventType: "process_started",
+                Timestamp: DateTimeOffset.UtcNow,
+                CodexAppServerPid: process.Id,
+                Message: "Started shell command."),
+            cancellationToken);
 
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
@@ -175,6 +186,15 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         }
 
         var success = process.ExitCode == 0;
+        await ReportUpdateAsync(
+            onUpdate,
+            new AgentRunUpdate(
+                EventType: success ? "process_completed" : "process_failed",
+                Timestamp: DateTimeOffset.UtcNow,
+                CodexAppServerPid: process.Id,
+                Message: $"Shell command exited with code {process.ExitCode}."),
+            cancellationToken);
+
         return new AgentRunResult(
             Success: success,
             ExitCode: process.ExitCode,
@@ -185,6 +205,7 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
 
     private async Task<AgentRunResult> RunAppServerCommandAsync(
         AgentRunRequest request,
+        Func<AgentRunUpdate, CancellationToken, Task>? onUpdate,
         CancellationToken cancellationToken)
     {
         var startInfo = BuildProcessStartInfo(request.Command, request.WorkspacePath);
@@ -197,6 +218,15 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         {
             throw new InvalidOperationException($"Failed to start command '{request.Command}'.");
         }
+
+        await ReportUpdateAsync(
+            onUpdate,
+            new AgentRunUpdate(
+                EventType: "process_started",
+                Timestamp: DateTimeOffset.UtcNow,
+                CodexAppServerPid: process.Id,
+                Message: "Started app-server process."),
+            cancellationToken);
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(request.TimeoutMs);
@@ -220,6 +250,7 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                        process.StandardOutput,
                        stdoutBuffer,
                        expectedRequestId: 1,
+                       onUpdate: onUpdate,
                        readTimeoutMs: request.ReadTimeoutMs,
                        timeoutCts.Token))
             {
@@ -249,6 +280,7 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                        process.StandardOutput,
                        stdoutBuffer,
                        expectedRequestId: 2,
+                       onUpdate: onUpdate,
                        readTimeoutMs: request.ReadTimeoutMs,
                        timeoutCts.Token))
             {
@@ -285,17 +317,29 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                        process.StandardOutput,
                        stdoutBuffer,
                        expectedRequestId: 3,
+                       onUpdate: onUpdate,
                        readTimeoutMs: request.ReadTimeoutMs,
                        timeoutCts.Token))
             {
                 EnsureNoProtocolError(turnResponse.RootElement, "turn/start");
-                _ = GetOptionalString(turnResponse.RootElement, "result", "turn", "id");
+                var turnId = GetOptionalString(turnResponse.RootElement, "result", "turn", "id");
+                await ReportUpdateAsync(
+                    onUpdate,
+                    new AgentRunUpdate(
+                        EventType: "session_started",
+                        Timestamp: DateTimeOffset.UtcNow,
+                        ThreadId: threadId,
+                        TurnId: turnId,
+                        CodexAppServerPid: process.Id,
+                        Message: "Codex session started."),
+                    timeoutCts.Token);
             }
 
             await TryShutdownAppServerAsync(
                 process.StandardInput,
                 process.StandardOutput,
                 stdoutBuffer,
+                onUpdate,
                 readTimeoutMs: request.ReadTimeoutMs,
                 timeoutCts.Token);
 
@@ -351,6 +395,14 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                       process.ExitCode == 0 &&
                       string.IsNullOrWhiteSpace(termination.KillError) &&
                       termination.ExitedAfterKillAttempt;
+        await ReportUpdateAsync(
+            onUpdate,
+            new AgentRunUpdate(
+                EventType: success ? "process_completed" : "process_failed",
+                Timestamp: DateTimeOffset.UtcNow,
+                CodexAppServerPid: process.Id,
+                Message: $"App-server exited with code {exitCode}."),
+            cancellationToken);
         var stderrText = AppendTerminationDetails(stderrBuffer.ToText(), termination);
 
         return new AgentRunResult(
@@ -370,13 +422,14 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         StreamWriter stdin,
         StreamReader stdout,
         BoundedOutputBuffer stdoutBuffer,
+        Func<AgentRunUpdate, CancellationToken, Task>? onUpdate,
         int readTimeoutMs,
         CancellationToken cancellationToken)
     {
         try
         {
             await SendRequestAsync(stdin, 4, "shutdown", new { }, cancellationToken);
-            using var _ = await ReadResponseAsync(stdout, stdoutBuffer, 4, readTimeoutMs, cancellationToken);
+            using var _ = await ReadResponseAsync(stdout, stdoutBuffer, 4, onUpdate, readTimeoutMs, cancellationToken);
         }
         catch
         {
@@ -539,6 +592,7 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         StreamReader reader,
         BoundedOutputBuffer stdoutBuffer,
         int expectedRequestId,
+        Func<AgentRunUpdate, CancellationToken, Task>? onUpdate,
         int readTimeoutMs,
         CancellationToken cancellationToken)
     {
@@ -563,6 +617,13 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
             }
 
             stdoutBuffer.AppendLine(line);
+            await ReportUpdateAsync(
+                onUpdate,
+                new AgentRunUpdate(
+                    EventType: "stdout_line",
+                    Timestamp: DateTimeOffset.UtcNow,
+                    Message: line),
+                cancellationToken);
 
             JsonDocument parsed;
             try
@@ -571,6 +632,13 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
             }
             catch (JsonException)
             {
+                await ReportUpdateAsync(
+                    onUpdate,
+                    new AgentRunUpdate(
+                        EventType: "malformed",
+                        Timestamp: DateTimeOffset.UtcNow,
+                        Message: line),
+                    cancellationToken);
                 continue;
             }
 
@@ -758,6 +826,19 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         }
 
         return $"{value}{Environment.NewLine}{line}";
+    }
+
+    private static Task ReportUpdateAsync(
+        Func<AgentRunUpdate, CancellationToken, Task>? onUpdate,
+        AgentRunUpdate update,
+        CancellationToken cancellationToken)
+    {
+        if (onUpdate is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        return onUpdate(update, cancellationToken);
     }
 
     private readonly record struct TerminationOutcome(bool ExitedAfterKillAttempt, string KillError)

@@ -36,6 +36,17 @@ public sealed class WorkflowPromptRenderer : IWorkflowPromptRenderer
             })
             .ToList();
 
+        var blockers = issue.BlockedBy
+            .Select(blocker =>
+            {
+                var blockerModel = new ScriptObject();
+                blockerModel.SetValue("id", blocker.Id, true);
+                blockerModel.SetValue("identifier", blocker.Identifier, true);
+                blockerModel.SetValue("state", blocker.State, true);
+                return blockerModel;
+            })
+            .ToList();
+
         var issueModel = new ScriptObject();
         issueModel.SetValue("id", issue.Id, true);
         issueModel.SetValue("identifier", issue.Identifier, true);
@@ -48,6 +59,7 @@ public sealed class WorkflowPromptRenderer : IWorkflowPromptRenderer
         issueModel.SetValue("milestone", issue.Milestone, true);
         issueModel.SetValue("labels", issue.Labels.ToList(), true);
         issueModel.SetValue("pull_requests", pullRequests, true);
+        issueModel.SetValue("blocked_by", blockers, true);
         issueModel.SetValue("created_at", issue.CreatedAt, true);
         issueModel.SetValue("updated_at", issue.UpdatedAt, true);
 

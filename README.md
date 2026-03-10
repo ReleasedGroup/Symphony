@@ -11,6 +11,13 @@ Current scaffold includes:
   - `GET /api/v1/health`
   - `GET /api/v1/runtime`
 
+## Runtime Behavior
+
+- GitHub issue normalization now includes linked branch metadata, blocker references, milestone data, and optional PR metadata for prompt rendering and orchestration.
+- SQLite persists workflow snapshots, issue cache, runs, run attempts, sessions, retry queue entries, workspace records, event log entries, leases, and dispatch claims for restart recovery and debugging.
+- Dispatch enforces exact active-state matching, per-state concurrency caps, continuation retries, exponential-backoff retries, and the `Todo` blocker rule.
+- Reconciliation refreshes active issue states every tick, stops non-active or terminal runs, cleans terminal workspaces, and reschedules stalled runs from the last Codex activity timestamp.
+
 ## Build and Test
 
 ```powershell
