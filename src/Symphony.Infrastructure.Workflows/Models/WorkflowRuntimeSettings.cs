@@ -4,6 +4,7 @@ public sealed record WorkflowRuntimeSettings(
     WorkflowTrackerSettings Tracker,
     WorkflowPollingSettings Polling,
     WorkflowAgentSettings Agent,
+    WorkflowServerSettings Server,
     WorkflowWorkspaceSettings Workspace,
     WorkflowHooksSettings Hooks,
     WorkflowCodexSettings Codex);
@@ -27,6 +28,8 @@ public sealed record WorkflowAgentSettings(
     int MaxTurns,
     int MaxRetryBackoffMs,
     IReadOnlyDictionary<string, int> MaxConcurrentAgentsByState);
+
+public sealed record WorkflowServerSettings(int? Port);
 
 public sealed record WorkflowWorkspaceSettings(
     string Root,

@@ -20,6 +20,9 @@ agent:
   max_turns: 20
   max_retry_backoff_ms: 300000
   max_concurrent_agents_by_state: {}
+server:
+  # Optional HTTP override. CLI --port wins when both are present.
+  port: null
 codex:
   command: codex app-server
   turn_timeout_ms: 3600000

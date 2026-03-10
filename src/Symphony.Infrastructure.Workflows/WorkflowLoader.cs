@@ -174,6 +174,12 @@ public sealed class WorkflowLoader
         }
 
         var maxConcurrentAgentsByState = GetNormalizedPositiveIntMap(agentMap, "max_concurrent_agents_by_state");
+        var serverMap = GetOptionalMap(config, "server");
+        var serverPort = GetOptionalNullableInt(serverMap, "port");
+        if (serverPort is < 0)
+        {
+            throw new WorkflowLoadException("invalid_server_port", "server.port must be >= 0.");
+        }
 
         var workspaceMap = GetOptionalMap(config, "workspace");
         var workspaceRoot = GetResolvedPathLikeValue(workspaceMap, "root", "./workspaces");
@@ -258,6 +264,7 @@ public sealed class WorkflowLoader
                 maxTurns,
                 maxRetryBackoffMs,
                 maxConcurrentAgentsByState),
+            new WorkflowServerSettings(serverPort),
             new WorkflowWorkspaceSettings(
                 workspaceRoot,
                 sharedClonePath,
@@ -449,6 +456,21 @@ public sealed class WorkflowLoader
         if (source is null || !source.TryGetValue(key, out var raw) || raw is null)
         {
             return defaultValue;
+        }
+
+        if (!TryGetInt(raw, out var parsed))
+        {
+            throw new WorkflowLoadException("workflow_parse_error", $"'{key}' must be an integer.");
+        }
+
+        return parsed;
+    }
+
+    private static int? GetOptionalNullableInt(Dictionary<string, object?>? source, string key)
+    {
+        if (source is null || !source.TryGetValue(key, out var raw) || raw is null)
+        {
+            return null;
         }
 
         if (!TryGetInt(raw, out var parsed))
