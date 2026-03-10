@@ -34,6 +34,13 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
                     name
                   }
                 }
+                linkedBranches(first: 10) {
+                  nodes {
+                    ref {
+                      name
+                    }
+                  }
+                }
                 closedByPullRequestsReferences(first: 10) @include(if: $includePullRequests) {
                   nodes {
                     id
@@ -42,6 +49,13 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
                     url
                     headRefName
                     baseRefName
+                  }
+                }
+                blockedBy(first: 20) {
+                  nodes {
+                    id
+                    number
+                    state
                   }
                 }
               }
@@ -83,6 +97,11 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         IReadOnlyList<string> states,
         CancellationToken cancellationToken = default)
     {
+        if (states.Count == 0)
+        {
+            return [];
+        }
+
         return await FetchIssuesInternalAsync(
             query,
             states,
@@ -109,40 +128,20 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         var statesById = new Dictionary<string, IssueStateSnapshot>(StringComparer.OrdinalIgnoreCase);
         foreach (var issueIdBatch in orderedIds.Chunk(100))
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", query.ApiKey);
-            request.Headers.UserAgent.Add(new ProductInfoHeaderValue("Symphony", "1.0"));
-            request.Content = JsonContent.Create(new
-            {
-                query = GraphQlIssueStatesByIdsQuery,
-                variables = new
+            using var request = BuildGraphQlRequest(
+                endpoint,
+                query.ApiKey,
+                GraphQlIssueStatesByIdsQuery,
+                new
                 {
                     ids = issueIdBatch
-                }
-            });
+                });
 
-            using var response = await httpClient.SendAsync(request, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new InvalidOperationException($"github_api_status: {(int)response.StatusCode}");
-            }
+            using var response = await SendAsync(request, cancellationToken);
+            using var document = await ParseGraphQlDocumentAsync(response, cancellationToken);
 
-            await using var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var document = await JsonDocument.ParseAsync(contentStream, cancellationToken: cancellationToken);
-
-            if (document.RootElement.TryGetProperty("errors", out var errorsElement) &&
-                errorsElement.ValueKind == JsonValueKind.Array &&
-                errorsElement.GetArrayLength() > 0)
-            {
-                throw new InvalidOperationException("github_graphql_errors");
-            }
-
-            if (!document.RootElement.TryGetProperty("data", out var dataElement) ||
-                !dataElement.TryGetProperty("nodes", out var nodesElement) ||
-                nodesElement.ValueKind != JsonValueKind.Array)
-            {
-                throw new InvalidOperationException("github_unknown_payload");
-            }
+            var dataElement = GetRequiredObject(document.RootElement, "data");
+            var nodesElement = GetRequiredArray(dataElement, "nodes");
 
             foreach (var issueNode in nodesElement.EnumerateArray())
             {
@@ -174,8 +173,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
                     continue;
                 }
 
-                var issueState = GetOptionalString(issueNode, "state") ?? "OPEN";
-                var normalizedState = issueState.Equals("CLOSED", StringComparison.OrdinalIgnoreCase) ? "Closed" : "Open";
+                var normalizedState = NormalizeState(GetOptionalString(issueNode, "state")) ?? "Open";
                 statesById[issueId] = new IssueStateSnapshot(issueId, normalizedState);
             }
         }
@@ -207,13 +205,11 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
 
         while (hasNextPage)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", query.ApiKey);
-            request.Headers.UserAgent.Add(new ProductInfoHeaderValue("Symphony", "1.0"));
-            request.Content = JsonContent.Create(new
-            {
-                query = GraphQlIssuesQuery,
-                variables = new
+            using var request = BuildGraphQlRequest(
+                endpoint,
+                query.ApiKey,
+                GraphQlIssuesQuery,
+                new
                 {
                     owner = query.Owner,
                     repo = query.Repo,
@@ -222,31 +218,17 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
                     includePullRequests = query.IncludePullRequests,
                     first = query.PageSize <= 0 ? 50 : query.PageSize,
                     after = cursor
-                }
-            });
+                });
 
-            using var response = await httpClient.SendAsync(request, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new InvalidOperationException($"github_api_status: {(int)response.StatusCode}");
-            }
+            using var response = await SendAsync(request, cancellationToken);
+            using var document = await ParseGraphQlDocumentAsync(response, cancellationToken);
 
-            await using var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var document = await JsonDocument.ParseAsync(contentStream, cancellationToken: cancellationToken);
+            var dataElement = GetRequiredObject(document.RootElement, "data");
+            var repositoryElement = GetRequiredObject(dataElement, "repository");
+            var issuesElement = GetRequiredObject(repositoryElement, "issues");
+            var nodesElement = GetRequiredArray(issuesElement, "nodes");
 
-            if (document.RootElement.TryGetProperty("errors", out var errorsElement) &&
-                errorsElement.ValueKind == JsonValueKind.Array &&
-                errorsElement.GetArrayLength() > 0)
-            {
-                throw new InvalidOperationException("github_graphql_errors");
-            }
-
-            var issuesElement = document.RootElement
-                .GetProperty("data")
-                .GetProperty("repository")
-                .GetProperty("issues");
-
-            foreach (var issueNode in issuesElement.GetProperty("nodes").EnumerateArray())
+            foreach (var issueNode in nodesElement.EnumerateArray())
             {
                 var issue = ParseIssue(issueNode, query.IncludePullRequests);
 
@@ -268,8 +250,8 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
                 candidateIssues.Add(issue);
             }
 
-            var pageInfo = issuesElement.GetProperty("pageInfo");
-            hasNextPage = pageInfo.GetProperty("hasNextPage").GetBoolean();
+            var pageInfo = GetRequiredObject(issuesElement, "pageInfo");
+            hasNextPage = GetRequiredBoolean(pageInfo, "hasNextPage");
             if (!hasNextPage)
             {
                 cursor = null;
@@ -278,13 +260,17 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
 
             if (!pageInfo.TryGetProperty("endCursor", out var endCursor))
             {
-                throw new InvalidOperationException("github_missing_end_cursor");
+                throw new GitHubTrackerException(
+                    "github_missing_end_cursor",
+                    "GitHub GraphQL pagination payload is missing endCursor.");
             }
 
             cursor = endCursor.GetString();
             if (string.IsNullOrWhiteSpace(cursor))
             {
-                throw new InvalidOperationException("github_missing_end_cursor");
+                throw new GitHubTrackerException(
+                    "github_missing_end_cursor",
+                    "GitHub GraphQL pagination payload contained an empty endCursor.");
             }
         }
 
@@ -293,15 +279,35 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
 
     private static NormalizedIssue ParseIssue(JsonElement issueNode, bool includePullRequests)
     {
-        var labels = issueNode
-            .GetProperty("labels")
-            .GetProperty("nodes")
-            .EnumerateArray()
-            .Select(node => node.GetProperty("name").GetString())
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .Select(name => name!.Trim().ToLowerInvariant())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var labels = issueNode.TryGetProperty("labels", out var labelsNode) &&
+                     labelsNode.ValueKind == JsonValueKind.Object &&
+                     labelsNode.TryGetProperty("nodes", out var labelNodes) &&
+                     labelNodes.ValueKind == JsonValueKind.Array
+            ? labelNodes
+                .EnumerateArray()
+                .Select(node => GetOptionalString(node, "name"))
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => name!.Trim().ToLowerInvariant())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList()
+            : [];
+
+        var blockedBy = issueNode.TryGetProperty("blockedBy", out var blockedByNode) &&
+                        blockedByNode.ValueKind == JsonValueKind.Object &&
+                        blockedByNode.TryGetProperty("nodes", out var blockerNodes) &&
+                        blockerNodes.ValueKind == JsonValueKind.Array
+            ? blockerNodes
+                .EnumerateArray()
+                .Select(node =>
+                {
+                    var number = GetOptionalInt(node, "number");
+                    return new BlockerRef(
+                        GetOptionalString(node, "id"),
+                        number.HasValue ? $"#{number.Value}" : null,
+                        NormalizeState(GetOptionalString(node, "state")));
+                })
+                .ToList()
+            : [];
 
         var pullRequests = includePullRequests &&
                            issueNode.TryGetProperty("closedByPullRequestsReferences", out var pullRequestReferencesNode) &&
@@ -328,11 +334,10 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
             ? milestoneTitleNode.GetString()
             : null;
 
-        var issueState = GetOptionalString(issueNode, "state") ?? "OPEN";
-        var normalizedState = issueState.Equals("CLOSED", StringComparison.OrdinalIgnoreCase) ? "Closed" : "Open";
+        var normalizedState = NormalizeState(GetOptionalString(issueNode, "state")) ?? "Open";
         var number = GetOptionalInt(issueNode, "number");
         var identifier = number is null ? GetOptionalString(issueNode, "id") ?? "unknown" : $"#{number.Value}";
-        var branchName = includePullRequests ? pullRequests.FirstOrDefault()?.HeadRef : null;
+        var branchName = GetLinkedBranchName(issueNode) ?? pullRequests.FirstOrDefault()?.HeadRef;
 
         return new NormalizedIssue(
             Id: GetOptionalString(issueNode, "id") ?? Guid.NewGuid().ToString("N"),
@@ -346,6 +351,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
             Milestone: milestoneTitle,
             Labels: labels,
             PullRequests: pullRequests,
+            BlockedBy: blockedBy,
             CreatedAt: ParseDateTimeOffset(issueNode, "createdAt"),
             UpdatedAt: ParseDateTimeOffset(issueNode, "updatedAt"));
     }
@@ -413,6 +419,35 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         return IssueStateMatcher.MatchesConfiguredActiveState(issueState, configuredStates);
     }
 
+    private static string? GetLinkedBranchName(JsonElement issueNode)
+    {
+        if (!issueNode.TryGetProperty("linkedBranches", out var linkedBranchesNode) ||
+            linkedBranchesNode.ValueKind != JsonValueKind.Object ||
+            !linkedBranchesNode.TryGetProperty("nodes", out var branchNodes) ||
+            branchNodes.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var node in branchNodes.EnumerateArray())
+        {
+            if (node.ValueKind != JsonValueKind.Object ||
+                !node.TryGetProperty("ref", out var refNode) ||
+                refNode.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var branchName = GetOptionalString(refNode, "name");
+            if (!string.IsNullOrWhiteSpace(branchName))
+            {
+                return branchName;
+            }
+        }
+
+        return null;
+    }
+
     private static int? InferPriority(IEnumerable<string> labels)
     {
         foreach (var label in labels)
@@ -439,6 +474,127 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         return element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.Number
             ? property.GetInt32()
             : null;
+    }
+
+    private static HttpRequestMessage BuildGraphQlRequest(
+        string endpoint,
+        string apiKey,
+        string graphQlQuery,
+        object variables)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        request.Headers.UserAgent.Add(new ProductInfoHeaderValue("Symphony", "1.0"));
+        request.Content = JsonContent.Create(new
+        {
+            query = graphQlQuery,
+            variables
+        });
+
+        return request;
+    }
+
+    private async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await httpClient.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                response.Dispose();
+                throw new GitHubTrackerException(
+                    "github_api_status",
+                    $"GitHub GraphQL returned HTTP {(int)response.StatusCode}.");
+            }
+
+            return response;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new GitHubTrackerException("github_api_request", "GitHub GraphQL request timed out.");
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new GitHubTrackerException("github_api_request", "GitHub GraphQL request failed.", ex);
+        }
+    }
+
+    private static async Task<JsonDocument> ParseGraphQlDocumentAsync(
+        HttpResponseMessage response,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var document = await JsonDocument.ParseAsync(contentStream, cancellationToken: cancellationToken);
+
+            if (document.RootElement.TryGetProperty("errors", out var errorsElement) &&
+                errorsElement.ValueKind == JsonValueKind.Array &&
+                errorsElement.GetArrayLength() > 0)
+            {
+                document.Dispose();
+                throw new GitHubTrackerException("github_graphql_errors", "GitHub GraphQL returned errors.");
+            }
+
+            return document;
+        }
+        catch (GitHubTrackerException)
+        {
+            throw;
+        }
+        catch (JsonException ex)
+        {
+            throw new GitHubTrackerException("github_unknown_payload", "GitHub GraphQL payload was not valid JSON.", ex);
+        }
+    }
+
+    private static JsonElement GetRequiredObject(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.Object)
+        {
+            throw new GitHubTrackerException(
+                "github_unknown_payload",
+                $"GitHub GraphQL payload is missing object property '{propertyName}'.");
+        }
+
+        return property;
+    }
+
+    private static JsonElement GetRequiredArray(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.Array)
+        {
+            throw new GitHubTrackerException(
+                "github_unknown_payload",
+                $"GitHub GraphQL payload is missing array property '{propertyName}'.");
+        }
+
+        return property;
+    }
+
+    private static bool GetRequiredBoolean(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+        {
+            throw new GitHubTrackerException(
+                "github_unknown_payload",
+                $"GitHub GraphQL payload is missing boolean property '{propertyName}'.");
+        }
+
+        return property.GetBoolean();
+    }
+
+    private static string? NormalizeState(string? state)
+    {
+        if (string.IsNullOrWhiteSpace(state))
+        {
+            return null;
+        }
+
+        return IssueStateMatcher.IsClosedState(state) ? "Closed" : "Open";
     }
 
     private static DateTimeOffset? ParseDateTimeOffset(JsonElement element, string propertyName)

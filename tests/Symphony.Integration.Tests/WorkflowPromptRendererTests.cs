@@ -10,11 +10,11 @@ public sealed class WorkflowPromptRendererTests
     public void RenderForIssue_ShouldRenderIssueFields()
     {
         var renderer = new WorkflowPromptRenderer();
-        var definition = CreateDefinition("Issue {{ issue.identifier }}: {{ issue.title }}");
+        var definition = CreateDefinition("Issue {{ issue.identifier }}: {{ issue.title }} blocker={{ issue.blocked_by[0].identifier }}");
 
         var output = renderer.RenderForIssue(definition, CreateIssue());
 
-        Assert.Equal("Issue #42: Fix orchestration dispatch", output);
+        Assert.Equal("Issue #42: Fix orchestration dispatch blocker=#41", output);
     }
 
     [Fact]
@@ -92,6 +92,7 @@ public sealed class WorkflowPromptRendererTests
             Milestone: "v1",
             Labels: ["backend"],
             PullRequests: [],
+            BlockedBy: [new BlockerRef("issue-41", "#41", "Open")],
             CreatedAt: DateTimeOffset.UtcNow,
             UpdatedAt: DateTimeOffset.UtcNow);
     }

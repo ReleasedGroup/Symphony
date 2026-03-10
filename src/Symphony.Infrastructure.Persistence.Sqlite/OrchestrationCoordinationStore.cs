@@ -99,9 +99,33 @@ public sealed class OrchestrationCoordinationStore(
 
         if (activeClaim is not null)
         {
-            var alreadyOwned = activeClaim.ClaimedByInstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase);
-            await transaction.RollbackAsync(cancellationToken);
-            return alreadyOwned;
+            if (activeClaim.ClaimedByInstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase))
+            {
+                activeClaim.UpdatedAtUtc = nowUtc;
+                await dbContext.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return true;
+            }
+
+            var ownerLease = await dbContext.InstanceLeases
+                .SingleOrDefaultAsync(
+                    item => item.OwnerInstanceId == activeClaim.ClaimedByInstanceId,
+                    cancellationToken);
+            var ownerHasLiveLease = ownerLease is not null && ownerLease.ExpiresAtUtc > nowUtc;
+
+            if (ownerHasLiveLease)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+
+            activeClaim.ClaimedByInstanceId = instanceId;
+            activeClaim.ClaimedAtUtc = nowUtc;
+            activeClaim.UpdatedAtUtc = nowUtc;
+            activeClaim.ReleasedAtUtc = null;
+            await dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return true;
         }
 
         dbContext.DispatchClaims.Add(new DispatchClaimEntity
@@ -110,6 +134,7 @@ public sealed class OrchestrationCoordinationStore(
             IssueIdentifier = issueIdentifier,
             ClaimedByInstanceId = instanceId,
             ClaimedAtUtc = nowUtc,
+            UpdatedAtUtc = nowUtc,
             Status = "active"
         });
 
@@ -149,6 +174,7 @@ public sealed class OrchestrationCoordinationStore(
         {
             claim.Status = releaseStatus;
             claim.ReleasedAtUtc = nowUtc;
+            claim.UpdatedAtUtc = nowUtc;
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);

@@ -6,5 +6,6 @@ public interface IAgentRunner
 {
     Task<AgentRunResult> RunIssueAsync(
         AgentRunRequest request,
+        Func<AgentRunUpdate, CancellationToken, Task>? onUpdate = null,
         CancellationToken cancellationToken = default);
 }

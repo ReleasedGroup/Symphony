@@ -7,6 +7,7 @@ public sealed class DispatchClaimEntity
     public string IssueIdentifier { get; set; } = string.Empty;
     public string ClaimedByInstanceId { get; set; } = string.Empty;
     public DateTimeOffset ClaimedAtUtc { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
     public DateTimeOffset? ReleasedAtUtc { get; set; }
     public string Status { get; set; } = "active";
 }

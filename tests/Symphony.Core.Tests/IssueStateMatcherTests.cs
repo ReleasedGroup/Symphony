@@ -37,4 +37,16 @@ public sealed class IssueStateMatcherTests
     {
         Assert.False(IssueStateMatcher.MatchesConfiguredActiveState("Closed", ["Open", "In Progress"]));
     }
+
+    [Fact]
+    public void MatchesConfiguredActiveState_ShouldRequireExactMatchForNonClosedStates()
+    {
+        Assert.False(IssueStateMatcher.MatchesConfiguredActiveState("Blocked", ["Open", "In Progress"]));
+    }
+
+    [Fact]
+    public void MatchesConfiguredActiveState_ShouldMatchNonClosedStatesIgnoringCaseAndWhitespace()
+    {
+        Assert.True(IssueStateMatcher.MatchesConfiguredActiveState("  In Progress ", ["open", "in progress"]));
+    }
 }
