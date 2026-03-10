@@ -44,11 +44,14 @@ public sealed partial class OrchestrationTickService
             .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
         var runningIssueIds = new HashSet<string>(runningIssues.Select(run => run.IssueId), StringComparer.OrdinalIgnoreCase);
 
-        var dueRetries = (await dbContext.RetryQueue
-                .ToListAsync(cancellationToken))
-            .Where(retry => retry.DueAtUtc <= timeProvider.GetUtcNow())
-            .OrderBy(retry => retry.DueAtUtc)
-            .ToList();
+        var dueRetries = await dbContext.RetryQueue
+            .FromSqlInterpolated($"""
+                SELECT *
+                FROM retry_queue
+                WHERE DueAtUtc <= {timeProvider.GetUtcNow()}
+                ORDER BY DueAtUtc
+                """)
+            .ToListAsync(cancellationToken);
 
         var candidatesById = issues.ToDictionary(issue => issue.Id, StringComparer.OrdinalIgnoreCase);
         foreach (var retryEntry in dueRetries)
@@ -123,6 +126,7 @@ public sealed partial class OrchestrationTickService
         var claimed = await coordinationStore.TryClaimIssueAsync(
             issue.Id,
             issue.Identifier,
+            ResolveLeaseName(),
             instanceId,
             cancellationToken);
 

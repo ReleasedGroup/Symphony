@@ -90,7 +90,12 @@ public sealed class IssueExecutionCoordinator(
                     RemoteRepositoryUrl: remoteUrl),
                 cancellationToken);
 
-            await UpsertWorkspaceRecordAsync(dbContext, request, workspace, cancellationToken);
+            await UpsertWorkspaceRecordAsync(
+                dbContext,
+                request,
+                workspace,
+                timeProvider.GetUtcNow(),
+                cancellationToken);
 
             if (workspace.CreatedNow)
             {
@@ -230,7 +235,12 @@ public sealed class IssueExecutionCoordinator(
                                 request.WorkflowDefinition.Runtime.Hooks.TimeoutMs),
                             CancellationToken.None);
 
-                        await UpdateWorkspaceCleanupAsync(dbContext, request.Issue, RunStopReasons.Terminal, CancellationToken.None);
+                        await UpdateWorkspaceCleanupAsync(
+                            dbContext,
+                            request.Issue,
+                            RunStopReasons.Terminal,
+                            timeProvider.GetUtcNow(),
+                            CancellationToken.None);
                     }
 
                     if (finalStatus is not null)
@@ -503,6 +513,7 @@ public sealed class IssueExecutionCoordinator(
         SymphonyDbContext dbContext,
         IssueExecutionRequest request,
         WorkspacePreparationResult workspace,
+        DateTimeOffset recordedAtUtc,
         CancellationToken cancellationToken)
     {
         var workspaceRecord = await dbContext.WorkspaceRecords.SingleOrDefaultAsync(
@@ -517,7 +528,7 @@ public sealed class IssueExecutionCoordinator(
                 IssueIdentifier = request.Issue.Identifier,
                 WorkspacePath = workspace.WorkspacePath,
                 BranchName = workspace.BranchName,
-                LastPreparedAtUtc = DateTimeOffset.UtcNow
+                LastPreparedAtUtc = recordedAtUtc
             });
         }
         else
@@ -525,7 +536,7 @@ public sealed class IssueExecutionCoordinator(
             workspaceRecord.IssueIdentifier = request.Issue.Identifier;
             workspaceRecord.WorkspacePath = workspace.WorkspacePath;
             workspaceRecord.BranchName = workspace.BranchName;
-            workspaceRecord.LastPreparedAtUtc = DateTimeOffset.UtcNow;
+            workspaceRecord.LastPreparedAtUtc = recordedAtUtc;
         }
 
         var run = await dbContext.Runs.SingleAsync(runEntity => runEntity.Id == request.RunId, cancellationToken);
@@ -541,6 +552,7 @@ public sealed class IssueExecutionCoordinator(
         SymphonyDbContext dbContext,
         NormalizedIssue issue,
         string reason,
+        DateTimeOffset cleanedAtUtc,
         CancellationToken cancellationToken)
     {
         var workspaceRecord = await dbContext.WorkspaceRecords.SingleOrDefaultAsync(
@@ -552,7 +564,7 @@ public sealed class IssueExecutionCoordinator(
             return;
         }
 
-        workspaceRecord.LastCleanedAtUtc = DateTimeOffset.UtcNow;
+        workspaceRecord.LastCleanedAtUtc = cleanedAtUtc;
         workspaceRecord.LastCleanupReason = reason;
         await dbContext.SaveChangesAsync(cancellationToken);
     }

@@ -88,6 +88,7 @@ public sealed class OrchestrationCoordinationStore(
     public async Task<bool> TryClaimIssueAsync(
         string issueId,
         string issueIdentifier,
+        string leaseName,
         string instanceId,
         CancellationToken cancellationToken = default)
     {
@@ -107,11 +108,12 @@ public sealed class OrchestrationCoordinationStore(
                 return true;
             }
 
-            var ownerLease = await dbContext.InstanceLeases
-                .SingleOrDefaultAsync(
-                    item => item.OwnerInstanceId == activeClaim.ClaimedByInstanceId,
-                    cancellationToken);
-            var ownerHasLiveLease = ownerLease is not null && ownerLease.ExpiresAtUtc > nowUtc;
+            var matchingLeases = await dbContext.InstanceLeases
+                .Where(item =>
+                    item.LeaseName == leaseName &&
+                    item.OwnerInstanceId == activeClaim.ClaimedByInstanceId)
+                .ToListAsync(cancellationToken);
+            var ownerHasLiveLease = matchingLeases.Any(item => item.ExpiresAtUtc > nowUtc);
 
             if (ownerHasLiveLease)
             {

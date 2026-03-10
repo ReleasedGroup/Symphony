@@ -13,6 +13,15 @@ public sealed partial class OrchestrationTickService
         CancellationToken cancellationToken)
     {
         var nowUtc = timeProvider.GetUtcNow();
+        var leaseName = ResolveLeaseName();
+        var liveLeaseOwners = (await dbContext.InstanceLeases
+            .Where(lease => lease.LeaseName == leaseName)
+            .ToListAsync(cancellationToken))
+            .Where(lease => lease.ExpiresAtUtc > nowUtc)
+            .Select(lease => lease.OwnerInstanceId)
+            .ToList();
+        var liveOwnerSet = new HashSet<string>(liveLeaseOwners, StringComparer.OrdinalIgnoreCase);
+
         var orphanedRuns = await dbContext.Runs
             .Where(run =>
                 (run.Status == RunStatusNames.Running || run.Status == RunStatusNames.Retrying) &&
@@ -21,9 +30,21 @@ public sealed partial class OrchestrationTickService
 
         foreach (var run in orphanedRuns)
         {
+            if (liveOwnerSet.Contains(run.OwnerInstanceId))
+            {
+                continue;
+            }
+
             var claim = await dbContext.DispatchClaims.SingleOrDefaultAsync(
                 entity => entity.IssueId == run.IssueId && entity.Status == "active",
                 cancellationToken);
+
+            if (claim is not null &&
+                !claim.ClaimedByInstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase) &&
+                liveOwnerSet.Contains(claim.ClaimedByInstanceId))
+            {
+                continue;
+            }
 
             if (claim is not null)
             {
@@ -68,14 +89,15 @@ public sealed partial class OrchestrationTickService
             run.LastMessage = "Recovered after instance takeover.";
             run.LastEventAtUtc = nowUtc;
 
-            UpsertRetryEntry(
+            await UpsertRetryEntryAsync(
                 run,
                 instanceId,
                 run.CurrentRetryAttempt.Value,
                 RetryDelayTypes.Backoff,
                 "recovered after instance takeover",
                 nowUtc.AddSeconds(1),
-                workflowDefinition.Runtime.Agent.MaxRetryBackoffMs);
+                workflowDefinition.Runtime.Agent.MaxRetryBackoffMs,
+                cancellationToken);
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -232,14 +254,15 @@ public sealed partial class OrchestrationTickService
         {
             run.Status = RunStatusNames.Retrying;
             run.CurrentRetryAttempt = (run.CurrentRetryAttempt ?? 0) + 1;
-            UpsertRetryEntry(
+            await UpsertRetryEntryAsync(
                 run,
                 instanceId,
                 run.CurrentRetryAttempt.Value,
                 RetryDelayTypes.Backoff,
                 "stall timeout exceeded",
                 nowUtc.AddMilliseconds(ComputeBackoffMs(run.CurrentRetryAttempt.Value, maxRetryBackoffMs)),
-                maxRetryBackoffMs);
+                maxRetryBackoffMs,
+                cancellationToken);
         }
         else
         {
@@ -267,16 +290,19 @@ public sealed partial class OrchestrationTickService
         }
     }
 
-    private void UpsertRetryEntry(
+    private async Task UpsertRetryEntryAsync(
         RunEntity run,
         string instanceId,
         int attempt,
         string delayType,
         string error,
         DateTimeOffset dueAtUtc,
-        int maxRetryBackoffMs)
+        int maxRetryBackoffMs,
+        CancellationToken cancellationToken)
     {
-        var retryEntry = dbContext.RetryQueue.SingleOrDefault(entry => entry.IssueId == run.IssueId);
+        var retryEntry = await dbContext.RetryQueue.SingleOrDefaultAsync(
+            entry => entry.IssueId == run.IssueId,
+            cancellationToken);
         if (retryEntry is null)
         {
             dbContext.RetryQueue.Add(new RetryQueueEntity

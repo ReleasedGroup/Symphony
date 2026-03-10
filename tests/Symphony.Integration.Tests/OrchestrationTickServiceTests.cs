@@ -180,6 +180,28 @@ public sealed class OrchestrationTickServiceTests
         Assert.Equal(RunStatusNames.Retrying, (await harness.DbContext.Runs.SingleAsync()).Status);
     }
 
+    [Fact]
+    public async Task RunTickAsync_ShouldNotRecoverRunsOwnedByInstancesWithLiveLease()
+    {
+        await using var harness = await TestHarness.CreateAsync(
+            BuildWorkflowDefinition(maxConcurrentAgents: 1),
+            tracker: new FakeTrackerClient([]),
+            coordinator: new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning));
+
+        await harness.InsertRunningRunAsync("issue-1", "#1", "Open", "instance-2");
+        await harness.InsertLeaseAsync("poll-dispatch", "instance-2", DateTimeOffset.UtcNow.AddMinutes(5));
+
+        await harness.Service.RunTickAsync(CancellationToken.None);
+
+        var run = await harness.DbContext.Runs.SingleAsync();
+        var claim = await harness.DbContext.DispatchClaims.SingleAsync();
+
+        Assert.Equal("instance-2", run.OwnerInstanceId);
+        Assert.Equal(RunStatusNames.Running, run.Status);
+        Assert.Equal("instance-2", claim.ClaimedByInstanceId);
+        Assert.Empty(await harness.DbContext.RetryQueue.ToListAsync());
+    }
+
     private static WorkflowDefinition BuildWorkflowDefinition(
         int maxConcurrentAgents,
         IReadOnlyList<string>? activeStates = null,
@@ -335,9 +357,43 @@ public sealed class OrchestrationTickServiceTests
             await DbContext.SaveChangesAsync();
         }
 
+        public async Task InsertLeaseAsync(string leaseName, string ownerInstanceId, DateTimeOffset expiresAtUtc)
+        {
+            DbContext.InstanceLeases.Add(new InstanceLeaseEntity
+            {
+                LeaseName = leaseName,
+                OwnerInstanceId = ownerInstanceId,
+                AcquiredAtUtc = expiresAtUtc.AddMinutes(-5),
+                ExpiresAtUtc = expiresAtUtc,
+                UpdatedAtUtc = expiresAtUtc.AddMinutes(-1)
+            });
+
+            await DbContext.SaveChangesAsync();
+        }
+
         public async ValueTask DisposeAsync()
         {
             await DbContext.DisposeAsync();
+            TryDeleteFile(dbPath);
+            TryDeleteFile($"{dbPath}-wal");
+            TryDeleteFile($"{dbPath}-shm");
+        }
+
+        private static void TryDeleteFile(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
         }
     }
 
