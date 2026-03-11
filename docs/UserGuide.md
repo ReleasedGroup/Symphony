@@ -16,7 +16,7 @@ In v1, Symphony ships with:
 ## Quick Start
 
 1. Set `GITHUB_TOKEN` in the environment.
-2. Edit [`WORKFLOW.md`](/C:/s/ReleasedGroup/Symphony/WORKFLOW.md) with your GitHub owner/repo and any label or milestone filters.
+2. Edit [`WORKFLOW.md`](../WORKFLOW.md) with your GitHub owner/repo and any label or milestone filters.
 3. Restore tools and build:
 
 ```powershell
@@ -38,7 +38,7 @@ http://127.0.0.1:<port>/api/v1/health
 
 ## Workflow Settings
 
-Symphony reads its runtime behavior from [`WORKFLOW.md`](/C:/s/ReleasedGroup/Symphony/WORKFLOW.md).
+Symphony reads its runtime behavior from [`WORKFLOW.md`](../WORKFLOW.md).
 
 Important settings:
 
@@ -84,6 +84,7 @@ The current v1 trust posture is permissive:
 - command/file approvals are auto-approved
 - user-input requests fail the run immediately
 - unsupported dynamic tool calls return a structured failure result and the session continues
+- supported tool execution failures return a structured failure result and are recorded as `tool_call_failed`
 - `github_graphql` is advertised and uses Symphony's configured GitHub endpoint and PAT
 
 `github_graphql` accepts either:

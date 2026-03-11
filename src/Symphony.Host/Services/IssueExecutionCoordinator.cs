@@ -674,7 +674,7 @@ public sealed class IssueExecutionCoordinator(
         var level = update.EventType switch
         {
             "turn_failed" or "turn_cancelled" or "turn_input_required" => LogLevel.Warning,
-            "malformed" or "unsupported_tool_call" => LogLevel.Warning,
+            "malformed" or "unsupported_tool_call" or "tool_call_failed" => LogLevel.Warning,
             _ => LogLevel.Information
         };
 

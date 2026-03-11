@@ -613,15 +613,22 @@ public sealed partial class CodexAgentRunner(
 
             var successProperty = toolResult.GetType().GetProperty("success");
             var toolSucceeded = successProperty?.GetValue(toolResult) as bool? == true;
+            var unsupportedToolCall = IsUnsupportedToolCall(toolResult);
 
             await ReportUpdateAsync(
                 onUpdate,
                 update with
                 {
-                    EventType = toolSucceeded ? "tool_call_succeeded" : "unsupported_tool_call",
+                    EventType = toolSucceeded
+                        ? "tool_call_succeeded"
+                        : unsupportedToolCall
+                            ? "unsupported_tool_call"
+                            : "tool_call_failed",
                     Message = toolSucceeded
                         ? $"Handled tool call '{toolCall.Name}'."
-                        : $"Tool call '{toolCall.Name}' failed.",
+                        : unsupportedToolCall
+                            ? $"Tool call '{toolCall.Name}' is not supported."
+                            : $"Tool call '{toolCall.Name}' failed.",
                     DataJson = SecretRedactor.Redact(JsonSerializer.Serialize(toolResult), request.TrackerQuery?.ApiKey)
                 },
                 cancellationToken);
@@ -766,6 +773,13 @@ public sealed partial class CodexAgentRunner(
         }
     }
 
+    private static bool IsUnsupportedToolCall(object toolResult)
+    {
+        var errorProperty = toolResult.GetType().GetProperty("error");
+        var errorCode = errorProperty?.GetValue(toolResult) as string;
+        return string.Equals(errorCode, "unsupported_tool_call", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool IsLikelyAppServerCommand(string command)
     {
         return command.Contains("app-server", StringComparison.OrdinalIgnoreCase);
@@ -862,7 +876,7 @@ public sealed partial class CodexAgentRunner(
         }
 
         logger.LogWarning(
-            "Process for issue_id={IssueIdentifier} outcome=forcing_termination context={Context}",
+            "Process for issue_identifier={IssueIdentifier} outcome=forcing_termination context={Context}",
             issueIdentifier,
             context);
 

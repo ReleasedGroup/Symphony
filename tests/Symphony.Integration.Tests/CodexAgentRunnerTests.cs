@@ -150,6 +150,45 @@ public sealed class CodexAgentRunnerTests
     }
 
     [Fact]
+    public async Task RunIssueAsync_ShouldClassifySupportedToolFailuresAsToolCallFailed()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return;
+        }
+
+        var tracker = new SequencedTrackerClient(
+            ["Closed"],
+            new GitHubGraphQlExecutionResult(
+                false,
+                "{\"errors\":[{\"message\":\"boom\"}]}",
+                "github_graphql_errors",
+                "GraphQL request failed."));
+        var updates = new List<AgentRunUpdate>();
+        var runner = CreateRunner(tracker);
+        using var harness = CreateAppServerHarness(ToolFailureScript());
+
+        var result = await runner.RunIssueAsync(
+            CreateRequest(
+                "id-6b",
+                "#6b",
+                harness.WorkspacePath,
+                harness.Command,
+                30_000,
+                maxTurns: 1,
+                trackerQuery: CreateTrackerQuery()),
+            (update, _) =>
+            {
+                updates.Add(update);
+                return Task.CompletedTask;
+            });
+
+        Assert.True(result.Success, result.Stderr);
+        Assert.Contains(updates, update => update.EventType == "tool_call_failed");
+        Assert.DoesNotContain(updates, update => update.EventType == "unsupported_tool_call");
+    }
+
+    [Fact]
     public async Task RunIssueAsync_ShouldFailWhenTurnRequestsUserInput()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -346,6 +385,25 @@ public sealed class CodexAgentRunnerTests
         }
         """;
 
+    private static string ToolFailureScript() => """
+        while (($line = [Console]::In.ReadLine()) -ne $null) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $request = $line | ConvertFrom-Json
+            if ($request.method -eq 'initialize') { @{ id = $request.id; result = @{ serverInfo = @{ name = 'fake'; version = '1.0' } } } | ConvertTo-Json -Compress; continue }
+            if ($request.method -eq 'thread/start') { @{ id = $request.id; result = @{ thread = @{ id = 'thread-1' } } } | ConvertTo-Json -Compress; continue }
+            if ($request.method -eq 'turn/start') {
+                @{ id = $request.id; result = @{ turn = @{ id = 'turn-1' } } } | ConvertTo-Json -Compress
+                @{ id = 'tool-1'; method = 'item/tool/call'; params = @{ name = 'github_graphql'; input = @{ query = 'query { viewer { login } }' } } } | ConvertTo-Json -Compress
+                $tool = ([Console]::In.ReadLine() | ConvertFrom-Json)
+                if ($tool.result.success) { throw 'tool call unexpectedly succeeded' }
+                if ($tool.result.error -ne 'github_graphql_errors') { throw "unexpected error code: $($tool.result.error)" }
+                @{ method = 'turn/completed'; params = @{ message = 'tool failed as expected' } } | ConvertTo-Json -Compress
+                continue
+            }
+            if ($request.method -eq 'shutdown') { @{ id = $request.id; result = @{ ok = $true } } | ConvertTo-Json -Compress; break }
+        }
+        """;
+
     private sealed class AppServerHarness(string workspacePath, string command) : IDisposable
     {
         public string WorkspacePath { get; } = workspacePath;
@@ -367,9 +425,13 @@ public sealed class CodexAgentRunnerTests
         }
     }
 
-    private sealed class SequencedTrackerClient(IReadOnlyList<string> states) : ITrackerClient
+    private sealed class SequencedTrackerClient(
+        IReadOnlyList<string> states,
+        GitHubGraphQlExecutionResult? graphQlResult = null) : ITrackerClient
     {
         private readonly Queue<string> pendingStates = new(states);
+        private readonly GitHubGraphQlExecutionResult configuredGraphQlResult =
+            graphQlResult ?? new GitHubGraphQlExecutionResult(true, "{\"data\":{\"viewer\":{\"login\":\"nick\"}}}");
 
         public int RefreshCount { get; private set; }
 
@@ -388,7 +450,7 @@ public sealed class CodexAgentRunnerTests
 
         public Task<GitHubGraphQlExecutionResult> ExecuteGitHubGraphQlAsync(TrackerQuery query, string graphQlDocument, string? variablesJson, CancellationToken cancellationToken = default)
         {
-            return Task.FromResult(new GitHubGraphQlExecutionResult(true, "{\"data\":{\"viewer\":{\"login\":\"nick\"}}}"));
+            return Task.FromResult(configuredGraphQlResult);
         }
     }
 }

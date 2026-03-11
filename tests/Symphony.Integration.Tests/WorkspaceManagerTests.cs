@@ -141,7 +141,7 @@ public sealed class WorkspaceManagerTests
 
             await RunGitAsync(tempRoot, ["init", "--bare", remoteBare]);
             await RunGitAsync(tempRoot, ["clone", remoteBare, seedClone]);
-            await RunGitAsync(seedClone, ["config", "user.name", "symfony-tests"]);
+            await RunGitAsync(seedClone, ["config", "user.name", "symphony-tests"]);
             await RunGitAsync(seedClone, ["config", "user.email", "symphony-tests@example.com"]);
             await File.WriteAllTextAsync(Path.Combine(seedClone, "README.md"), "seed");
             await RunGitAsync(seedClone, ["add", "README.md"]);

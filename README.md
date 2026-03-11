@@ -16,7 +16,7 @@ Current scaffold includes:
 
 ## User Guide
 
-See the full guide at [docs/UserGuide.md](/C:/s/ReleasedGroup/Symphony/docs/UserGuide.md).
+See the full guide at [docs/UserGuide.md](docs/UserGuide.md).
 
 ## Runtime Behavior
 
@@ -24,7 +24,7 @@ See the full guide at [docs/UserGuide.md](/C:/s/ReleasedGroup/Symphony/docs/User
 - SQLite persists workflow snapshots, issue cache, runs, run attempts, sessions, retry queue entries, workspace records, event log entries, leases, and dispatch claims for restart recovery and debugging.
 - Dispatch enforces exact active-state matching, per-state concurrency caps, continuation retries, exponential-backoff retries, and the `Todo` blocker rule.
 - Reconciliation refreshes active issue states every tick, stops non-active or terminal runs, cleans terminal workspaces, and reschedules stalled runs from the last Codex activity timestamp.
-- Codex app-server sessions now support streamed multi-turn execution on a shared thread, permissive auto-approval, structured unsupported-tool failures, and the `github_graphql` client-side tool.
+- Codex app-server sessions now support streamed multi-turn execution on a shared thread, permissive auto-approval, structured tool-call failures, and the `github_graphql` client-side tool.
 - Runtime state, recent events, token totals, and latest rate-limit payloads are available through the HTTP API and are derived from persisted orchestrator state.
 
 ## Build and Test
