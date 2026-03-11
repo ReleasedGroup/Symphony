@@ -106,7 +106,9 @@ internal static class SymphonyHostApplication
         services.AddSymphonyCodexAgentRunner();
         services.AddSymphonyWorkspaceServices();
         services.AddSingleton<IIssueExecutionCoordinator, IssueExecutionCoordinator>();
+        services.AddSingleton<RefreshSignalService>();
         services.AddScoped<OrchestrationTickService>();
+        services.AddScoped<RuntimeStateService>();
 
         services
             .AddHealthChecks()
@@ -260,6 +262,45 @@ internal static class SymphonyHostApplication
                 },
                 workflow,
                 workflowError
+            });
+        });
+
+        app.MapGet("/api/v1/state", async (
+            RuntimeStateService runtimeStateService,
+            CancellationToken cancellationToken) =>
+        {
+            var payload = await runtimeStateService.GetStateAsync(cancellationToken);
+            return Results.Ok(payload);
+        });
+
+        app.MapGet("/api/v1/{issueIdentifier}", async (
+            string issueIdentifier,
+            RuntimeStateService runtimeStateService,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await runtimeStateService.GetIssueStateAsync(issueIdentifier, cancellationToken);
+            return result.Found
+                ? Results.Ok(result.Payload)
+                : Results.NotFound(new
+                {
+                    error = new
+                    {
+                        code = "issue_not_found",
+                        message = $"Issue '{issueIdentifier}' was not found in runtime state."
+                    }
+                });
+        });
+
+        app.MapPost("/api/v1/refresh", (
+            RefreshSignalService refreshSignalService) =>
+        {
+            var request = refreshSignalService.RequestRefresh();
+            return Results.Accepted(value: new
+            {
+                queued = request.Queued,
+                coalesced = request.Coalesced,
+                requested_at = request.RequestedAt,
+                operations = new[] { "poll", "reconcile" }
             });
         });
 

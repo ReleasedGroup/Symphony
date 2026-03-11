@@ -8,7 +8,9 @@ using Symphony.Core.Models;
 
 namespace Symphony.Infrastructure.Agent.Codex;
 
-public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentRunner
+public sealed partial class CodexAgentRunner(
+    ITrackerClient trackerClient,
+    ILogger<CodexAgentRunner> logger) : IAgentRunner
 {
     private const int MaxCapturedOutputChars = 256_000;
     private const int KillGracePeriodMs = 10_000;
@@ -50,6 +52,11 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         if (request.TimeoutMs <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(request.TimeoutMs), "TimeoutMs must be > 0.");
+        }
+
+        if (request.MaxTurns <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request.MaxTurns), "MaxTurns must be > 0.");
         }
 
         if (string.IsNullOrWhiteSpace(request.ApprovalPolicy))
@@ -127,11 +134,9 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         }
         catch (IOException) when (process.HasExited)
         {
-            // Process exited before consuming stdin.
         }
         catch (InvalidOperationException) when (process.HasExited)
         {
-            // Process exited before consuming stdin.
         }
         finally
         {
@@ -169,11 +174,6 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
 
         if (timedOut)
         {
-            logger.LogWarning(
-                "Agent command timed out for issue {IssueIdentifier} after {TimeoutMs}ms.",
-                request.IssueIdentifier,
-                request.TimeoutMs);
-
             stderr = AppendLine(stderr, $"Command timed out after {request.TimeoutMs}ms.");
             stderr = AppendTerminationDetails(stderr, termination);
 
@@ -182,7 +182,8 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                 ExitCode: -1,
                 Stdout: stdout,
                 Stderr: stderr,
-                Duration: startedAt.Elapsed);
+                Duration: startedAt.Elapsed,
+                ErrorCode: "turn_timeout");
         }
 
         var success = process.ExitCode == 0;
@@ -200,7 +201,8 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
             ExitCode: process.ExitCode,
             Stdout: stdout,
             Stderr: stderr,
-            Duration: startedAt.Elapsed);
+            Duration: startedAt.Elapsed,
+            ErrorCode: success ? null : "process_failed");
     }
 
     private async Task<AgentRunResult> RunAppServerCommandAsync(
@@ -228,11 +230,15 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                 Message: "Started app-server process."),
             cancellationToken);
 
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(request.TimeoutMs);
-        var stderrPumpTask = PumpReaderAsync(process.StandardError, stderrBuffer, timeoutCts.Token);
-
+        using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var stderrPumpTask = PumpReaderAsync(process.StandardError, stderrBuffer, sessionCts.Token);
+        var protocolReader = new ProtocolReader(
+            process.StandardOutput,
+            stdoutBuffer,
+            process.Id,
+            request.TrackerQuery?.ApiKey);
         TerminationOutcome termination = TerminationOutcome.NotNeeded;
+
         try
         {
             await SendRequestAsync(
@@ -242,26 +248,21 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                 @params: new
                 {
                     clientInfo = new { name = ClientName, version = ClientVersion },
-                    capabilities = new { }
+                    capabilities = BuildCapabilities(request)
                 },
-                timeoutCts.Token);
+                cancellationToken);
 
             using (var initializeResponse = await ReadResponseAsync(
-                       process.StandardOutput,
-                       stdoutBuffer,
+                       protocolReader,
                        expectedRequestId: 1,
-                       onUpdate: onUpdate,
-                       readTimeoutMs: request.ReadTimeoutMs,
-                       timeoutCts.Token))
+                       onUpdate,
+                       request.ReadTimeoutMs,
+                       cancellationToken))
             {
                 EnsureNoProtocolError(initializeResponse.RootElement, "initialize");
             }
 
-            await SendNotificationAsync(
-                process.StandardInput,
-                method: "initialized",
-                @params: new { },
-                timeoutCts.Token);
+            await SendNotificationAsync(process.StandardInput, "initialized", new { }, cancellationToken);
 
             await SendRequestAsync(
                 process.StandardInput,
@@ -271,58 +272,66 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                 {
                     approvalPolicy = request.ApprovalPolicy,
                     sandbox = request.ThreadSandbox,
-                    cwd = request.WorkspacePath
+                    cwd = request.WorkspacePath,
+                    tools = BuildAdvertisedTools(request)
                 },
-                timeoutCts.Token);
+                cancellationToken);
 
             string threadId;
             using (var threadResponse = await ReadResponseAsync(
-                       process.StandardOutput,
-                       stdoutBuffer,
+                       protocolReader,
                        expectedRequestId: 2,
-                       onUpdate: onUpdate,
-                       readTimeoutMs: request.ReadTimeoutMs,
-                       timeoutCts.Token))
+                       onUpdate,
+                       request.ReadTimeoutMs,
+                       cancellationToken))
             {
                 EnsureNoProtocolError(threadResponse.RootElement, "thread/start");
                 threadId = GetRequiredString(threadResponse.RootElement, "result", "thread", "id");
             }
 
-            await SendRequestAsync(
-                process.StandardInput,
-                requestId: 3,
-                method: "turn/start",
-                @params: new
-                {
-                    threadId,
-                    input = new[]
+            for (var turnNumber = 1; turnNumber <= request.MaxTurns; turnNumber++)
+            {
+                var turnPrompt = turnNumber == 1
+                    ? request.Prompt
+                    : BuildContinuationPrompt(request, turnNumber);
+
+                await SendRequestAsync(
+                    process.StandardInput,
+                    requestId: 3,
+                    method: "turn/start",
+                    @params: new
                     {
-                        new
+                        threadId,
+                        input = new[]
                         {
-                            type = "text",
-                            text = request.Prompt
+                            new
+                            {
+                                type = "text",
+                                text = turnPrompt
+                            }
+                        },
+                        cwd = request.WorkspacePath,
+                        title = $"{request.IssueIdentifier}: {request.IssueTitle}",
+                        approvalPolicy = request.ApprovalPolicy,
+                        sandboxPolicy = new
+                        {
+                            type = request.TurnSandboxPolicy
                         }
                     },
-                    cwd = request.WorkspacePath,
-                    title = request.IssueIdentifier,
-                    approvalPolicy = request.ApprovalPolicy,
-                    sandboxPolicy = new
-                    {
-                        type = request.TurnSandboxPolicy
-                    }
-                },
-                timeoutCts.Token);
+                    cancellationToken);
 
-            using (var turnResponse = await ReadResponseAsync(
-                       process.StandardOutput,
-                       stdoutBuffer,
-                       expectedRequestId: 3,
-                       onUpdate: onUpdate,
-                       readTimeoutMs: request.ReadTimeoutMs,
-                       timeoutCts.Token))
-            {
-                EnsureNoProtocolError(turnResponse.RootElement, "turn/start");
-                var turnId = GetOptionalString(turnResponse.RootElement, "result", "turn", "id");
+                string? turnId;
+                using (var turnResponse = await ReadResponseAsync(
+                           protocolReader,
+                           expectedRequestId: 3,
+                           onUpdate,
+                           request.ReadTimeoutMs,
+                           cancellationToken))
+                {
+                    EnsureNoProtocolError(turnResponse.RootElement, "turn/start");
+                    turnId = GetOptionalString(turnResponse.RootElement, "result", "turn", "id");
+                }
+
                 await ReportUpdateAsync(
                     onUpdate,
                     new AgentRunUpdate(
@@ -331,39 +340,65 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                         ThreadId: threadId,
                         TurnId: turnId,
                         CodexAppServerPid: process.Id,
-                        Message: "Codex session started."),
-                    timeoutCts.Token);
+                        Message: $"Codex turn {turnNumber} started."),
+                    cancellationToken);
+
+                await StreamTurnAsync(
+                    protocolReader,
+                    process.StandardInput,
+                    request,
+                    threadId,
+                    turnId,
+                    turnNumber,
+                    onUpdate,
+                    cancellationToken);
+
+                if (turnNumber >= request.MaxTurns)
+                {
+                    break;
+                }
+
+                var refreshedState = await RefreshIssueStateAsync(request, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(refreshedState) &&
+                    !IssueStateMatcher.MatchesConfiguredActiveState(
+                        refreshedState,
+                        request.TrackerQuery?.ActiveStates ?? []))
+                {
+                    break;
+                }
             }
 
             await TryShutdownAppServerAsync(
                 process.StandardInput,
-                process.StandardOutput,
-                stdoutBuffer,
+                protocolReader,
                 onUpdate,
-                readTimeoutMs: request.ReadTimeoutMs,
-                timeoutCts.Token);
+                request.ReadTimeoutMs,
+                CancellationToken.None);
 
+            sessionCts.Cancel();
             termination = await EnsureProcessStoppedAsync(
                 process,
                 request.IssueIdentifier,
                 gracePeriodMs: request.ReadTimeoutMs,
                 context: "app-server graceful shutdown");
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (RunnerFailureException ex)
         {
-            termination = await TerminateProcessAsync(process, request.IssueIdentifier, "timed-out app-server run");
+            termination = await TerminateProcessAsync(process, request.IssueIdentifier, ex.Code);
+            sessionCts.Cancel();
             await SafeAwaitReaderPumpAsync(stderrPumpTask, request.ReadTimeoutMs);
             startedAt.Stop();
 
-            var stderr = AppendLine(stderrBuffer.ToText(), $"Command timed out after {request.TimeoutMs}ms.");
+            var stderr = AppendLine(stderrBuffer.ToText(), $"{ex.Code}: {SecretRedactor.Redact(ex.Message, request.TrackerQuery?.ApiKey)}");
             stderr = AppendTerminationDetails(stderr, termination);
 
             return new AgentRunResult(
                 Success: false,
-                ExitCode: -1,
+                ExitCode: process.HasExited ? process.ExitCode : -2,
                 Stdout: stdoutBuffer.ToText(),
                 Stderr: stderr,
-                Duration: startedAt.Elapsed);
+                Duration: startedAt.Elapsed,
+                ErrorCode: ex.Code);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -372,11 +407,14 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         }
         catch (Exception ex)
         {
-            termination = await TerminateProcessAsync(process, request.IssueIdentifier, "app-server protocol failure");
+            termination = await TerminateProcessAsync(process, request.IssueIdentifier, "response_error");
+            sessionCts.Cancel();
             await SafeAwaitReaderPumpAsync(stderrPumpTask, request.ReadTimeoutMs);
             startedAt.Stop();
 
-            var stderr = AppendLine(stderrBuffer.ToText(), $"app_server_error: {ex.Message}");
+            var stderr = AppendLine(
+                stderrBuffer.ToText(),
+                $"response_error: {SecretRedactor.Redact(ex.Message, request.TrackerQuery?.ApiKey)}");
             stderr = AppendTerminationDetails(stderr, termination);
 
             return new AgentRunResult(
@@ -384,7 +422,8 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                 ExitCode: process.HasExited ? process.ExitCode : -2,
                 Stdout: stdoutBuffer.ToText(),
                 Stderr: stderr,
-                Duration: startedAt.Elapsed);
+                Duration: startedAt.Elapsed,
+                ErrorCode: "response_error");
         }
 
         await SafeAwaitReaderPumpAsync(stderrPumpTask, request.ReadTimeoutMs);
@@ -395,6 +434,7 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                       process.ExitCode == 0 &&
                       string.IsNullOrWhiteSpace(termination.KillError) &&
                       termination.ExitedAfterKillAttempt;
+
         await ReportUpdateAsync(
             onUpdate,
             new AgentRunUpdate(
@@ -403,14 +443,327 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
                 CodexAppServerPid: process.Id,
                 Message: $"App-server exited with code {exitCode}."),
             cancellationToken);
-        var stderrText = AppendTerminationDetails(stderrBuffer.ToText(), termination);
 
         return new AgentRunResult(
             Success: success,
             ExitCode: exitCode,
             Stdout: stdoutBuffer.ToText(),
-            Stderr: stderrText,
-            Duration: startedAt.Elapsed);
+            Stderr: AppendTerminationDetails(stderrBuffer.ToText(), termination),
+            Duration: startedAt.Elapsed,
+            ErrorCode: success ? null : "process_failed");
+    }
+
+    private async Task StreamTurnAsync(
+        ProtocolReader protocolReader,
+        StreamWriter stdin,
+        AgentRunRequest request,
+        string threadId,
+        string? turnId,
+        int turnNumber,
+        Func<AgentRunUpdate, CancellationToken, Task>? onUpdate,
+        CancellationToken cancellationToken)
+    {
+        using var turnCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        turnCts.CancelAfter(request.TimeoutMs);
+
+        while (true)
+        {
+            ProtocolLine protocolLine;
+            try
+            {
+                protocolLine = await protocolReader.ReadNextAsync(turnCts.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new RunnerFailureException("turn_timeout", $"Turn {turnNumber} timed out after {request.TimeoutMs}ms.");
+            }
+
+            if (protocolLine.IsEndOfStream)
+            {
+                throw new RunnerFailureException("subprocess_exit", "App-server stdout closed during turn processing.");
+            }
+
+            if (protocolLine.RawLine is null)
+            {
+                continue;
+            }
+
+            if (protocolLine.Document is null)
+            {
+                await ReportUpdateAsync(
+                    onUpdate,
+                    new AgentRunUpdate(
+                        EventType: "malformed",
+                        Timestamp: DateTimeOffset.UtcNow,
+                        ThreadId: threadId,
+                        TurnId: turnId,
+                        CodexAppServerPid: protocolReader.ProcessId,
+                        Message: protocolLine.RawLine,
+                        DataJson: JsonSerializer.Serialize(new { raw = SecretRedactor.Redact(protocolLine.RawLine, request.TrackerQuery?.ApiKey) })),
+                    cancellationToken);
+                continue;
+            }
+
+            using (protocolLine.Document)
+            {
+                await HandleProtocolMessageAsync(
+                    protocolLine.Document.RootElement,
+                    stdin,
+                    request,
+                    threadId,
+                    turnId,
+                    onUpdate,
+                    cancellationToken);
+
+                if (IsTurnCompletedEvent(GetEventName(protocolLine.Document.RootElement)))
+                {
+                    return;
+                }
+            }
+        }
+    }
+
+    private async Task HandleProtocolMessageAsync(
+        JsonElement message,
+        StreamWriter stdin,
+        AgentRunRequest request,
+        string threadId,
+        string? turnId,
+        Func<AgentRunUpdate, CancellationToken, Task>? onUpdate,
+        CancellationToken cancellationToken)
+    {
+        var eventName = GetEventName(message);
+        var update = CreateProtocolUpdate(message, eventName, threadId, turnId, request.TrackerQuery?.ApiKey);
+
+        if (IsTurnCompletedEvent(eventName))
+        {
+            await ReportUpdateAsync(
+                onUpdate,
+                update with
+                {
+                    EventType = "turn_completed",
+                    Message = string.IsNullOrWhiteSpace(update.Message) ? "Turn completed." : update.Message
+                },
+                cancellationToken);
+            return;
+        }
+
+        if (IsTurnFailedEvent(eventName))
+        {
+            await ReportUpdateAsync(
+                onUpdate,
+                update with
+                {
+                    EventType = "turn_failed",
+                    Message = string.IsNullOrWhiteSpace(update.Message) ? "Turn failed." : update.Message
+                },
+                cancellationToken);
+
+            throw new RunnerFailureException("turn_failed", update.Message ?? "Turn failed.");
+        }
+
+        if (IsTurnCancelledEvent(eventName))
+        {
+            await ReportUpdateAsync(
+                onUpdate,
+                update with
+                {
+                    EventType = "turn_cancelled",
+                    Message = string.IsNullOrWhiteSpace(update.Message) ? "Turn cancelled." : update.Message
+                },
+                cancellationToken);
+
+            throw new RunnerFailureException("turn_cancelled", update.Message ?? "Turn cancelled.");
+        }
+
+        if (IsUserInputRequired(message, eventName))
+        {
+            await ReportUpdateAsync(
+                onUpdate,
+                update with
+                {
+                    EventType = "turn_input_required",
+                    Message = string.IsNullOrWhiteSpace(update.Message)
+                        ? "Turn requested user input."
+                        : update.Message
+                },
+                cancellationToken);
+
+            throw new RunnerFailureException("turn_input_required", update.Message ?? "Turn requested user input.");
+        }
+
+        if (TryGetApprovalRequest(message, eventName, out var approvalRequestId))
+        {
+            await SendResponseAsync(stdin, approvalRequestId!, new { approved = true }, cancellationToken);
+            await ReportUpdateAsync(
+                onUpdate,
+                update with
+                {
+                    EventType = "approval_auto_approved",
+                    Message = "Approved request automatically according to the configured v1 policy."
+                },
+                cancellationToken);
+            return;
+        }
+
+        if (TryGetToolCall(message, eventName, out var toolCall))
+        {
+            var toolResult = await ExecuteToolCallAsync(request, toolCall, cancellationToken);
+            await SendResponseAsync(stdin, toolCall.RequestId, toolResult, cancellationToken);
+
+            var successProperty = toolResult.GetType().GetProperty("success");
+            var toolSucceeded = successProperty?.GetValue(toolResult) as bool? == true;
+
+            await ReportUpdateAsync(
+                onUpdate,
+                update with
+                {
+                    EventType = toolSucceeded ? "tool_call_succeeded" : "unsupported_tool_call",
+                    Message = toolSucceeded
+                        ? $"Handled tool call '{toolCall.Name}'."
+                        : $"Tool call '{toolCall.Name}' failed.",
+                    DataJson = SecretRedactor.Redact(JsonSerializer.Serialize(toolResult), request.TrackerQuery?.ApiKey)
+                },
+                cancellationToken);
+            return;
+        }
+
+        await ReportUpdateAsync(
+            onUpdate,
+            update with
+            {
+                EventType = string.Equals(eventName, "notification", StringComparison.OrdinalIgnoreCase)
+                    ? "notification"
+                    : "other_message"
+            },
+            cancellationToken);
+    }
+
+    private async Task<string?> RefreshIssueStateAsync(
+        AgentRunRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.TrackerQuery is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var refreshedStates = await trackerClient.FetchIssueStatesByIdsAsync(
+                request.TrackerQuery,
+                [request.IssueId],
+                cancellationToken);
+
+            return refreshedStates.FirstOrDefault()?.State;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            throw new RunnerFailureException(
+                "issue_state_refresh_error",
+                SecretRedactor.Redact(ex.Message, request.TrackerQuery.ApiKey) ?? "Issue state refresh failed.",
+                ex);
+        }
+    }
+
+    private async Task<object> ExecuteToolCallAsync(
+        AgentRunRequest request,
+        ToolCallRequest toolCall,
+        CancellationToken cancellationToken)
+    {
+        if (!toolCall.Name.Equals("github_graphql", StringComparison.OrdinalIgnoreCase))
+        {
+            return new { success = false, error = "unsupported_tool_call" };
+        }
+
+        if (request.TrackerQuery is null)
+        {
+            return new { success = false, error = "missing_tracker_auth" };
+        }
+
+        var parseResult = ParseGitHubGraphQlToolInput(toolCall.InputJson);
+        if (!parseResult.Success)
+        {
+            return new { success = false, error = parseResult.ErrorCode, message = parseResult.ErrorMessage };
+        }
+
+        var executionResult = await trackerClient.ExecuteGitHubGraphQlAsync(
+            request.TrackerQuery,
+            parseResult.Query!,
+            parseResult.VariablesJson,
+            cancellationToken);
+
+        var payload = TryParseJson(executionResult.PayloadJson);
+        return new
+        {
+            success = executionResult.Success,
+            error = executionResult.ErrorCode,
+            message = executionResult.ErrorMessage,
+            payload
+        };
+    }
+
+    private static (bool Success, string? Query, string? VariablesJson, string? ErrorCode, string? ErrorMessage) ParseGitHubGraphQlToolInput(string? inputJson)
+    {
+        if (string.IsNullOrWhiteSpace(inputJson))
+        {
+            return (false, null, null, "invalid_graphql_input", "Tool input must be a raw GraphQL string or an object with query/variables.");
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(inputJson);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.String)
+            {
+                var shorthandQuery = root.GetString();
+                return string.IsNullOrWhiteSpace(shorthandQuery)
+                    ? (false, null, null, "invalid_graphql_input", "GraphQL query must be non-empty.")
+                    : (true, shorthandQuery, null, null, null);
+            }
+
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return (false, null, null, "invalid_graphql_input", "Tool input must be a JSON object.");
+            }
+
+            var query = GetOptionalString(root, "query");
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                return (false, null, null, "invalid_graphql_input", "Tool input must include a non-empty 'query'.");
+            }
+
+            string? variablesJson = null;
+            if (root.TryGetProperty("variables", out var variablesElement) &&
+                variablesElement.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
+            {
+                if (variablesElement.ValueKind != JsonValueKind.Object)
+                {
+                    return (false, null, null, "invalid_graphql_input", "Tool input 'variables' must be a JSON object.");
+                }
+
+                variablesJson = variablesElement.GetRawText();
+            }
+
+            return (true, query, variablesJson, null, null);
+        }
+        catch (JsonException ex)
+        {
+            return (false, null, null, "invalid_graphql_input", ex.Message);
+        }
+    }
+
+    private static object? TryParseJson(string payloadJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            return document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            return payloadJson;
+        }
     }
 
     private static bool IsLikelyAppServerCommand(string command)
@@ -418,10 +771,56 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         return command.Contains("app-server", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static object BuildCapabilities(AgentRunRequest request)
+    {
+        return request.TrackerQuery is null
+            ? new { }
+            : new
+            {
+                tools = BuildAdvertisedTools(request)
+            };
+    }
+
+    private static object[] BuildAdvertisedTools(AgentRunRequest request)
+    {
+        if (request.TrackerQuery is null)
+        {
+            return [];
+        }
+
+        return
+        [
+            new
+            {
+                name = "github_graphql",
+                description = "Execute one GitHub GraphQL operation with the configured Symphony tracker credentials.",
+                inputSchema = new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        query = new { type = "string" },
+                        variables = new { type = "object" }
+                    },
+                    required = new[] { "query" }
+                }
+            }
+        ];
+    }
+
+    private static string BuildContinuationPrompt(AgentRunRequest request, int turnNumber)
+    {
+        return $"""
+            Continue working on {request.IssueIdentifier}: {request.IssueTitle}.
+            This is continuation turn {turnNumber} of {request.MaxTurns} in the current live Codex thread.
+            Use the existing thread history instead of repeating the original issue prompt.
+            If the issue is already complete or blocked, summarize the current status briefly and stop making changes.
+            """;
+    }
+
     private static async Task TryShutdownAppServerAsync(
         StreamWriter stdin,
-        StreamReader stdout,
-        BoundedOutputBuffer stdoutBuffer,
+        ProtocolReader protocolReader,
         Func<AgentRunUpdate, CancellationToken, Task>? onUpdate,
         int readTimeoutMs,
         CancellationToken cancellationToken)
@@ -429,11 +828,10 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         try
         {
             await SendRequestAsync(stdin, 4, "shutdown", new { }, cancellationToken);
-            using var _ = await ReadResponseAsync(stdout, stdoutBuffer, 4, onUpdate, readTimeoutMs, cancellationToken);
+            using var _ = await ReadResponseAsync(protocolReader, 4, onUpdate, readTimeoutMs, cancellationToken);
         }
         catch
         {
-            // Best-effort shutdown path.
         }
 
         try
@@ -443,7 +841,6 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         }
         catch
         {
-            // Best-effort shutdown path.
         }
     }
 
@@ -465,7 +862,7 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         }
 
         logger.LogWarning(
-            "Process for issue {IssueIdentifier} did not exit during {Context}; forcing termination.",
+            "Process for issue_id={IssueIdentifier} outcome=forcing_termination context={Context}",
             issueIdentifier,
             context);
 
@@ -483,28 +880,18 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         if (!TryKillProcess(process, out killError))
         {
             logger.LogWarning(
-                "Failed to terminate process for issue {IssueIdentifier} during {Context}. Error: {Error}",
+                "Process termination failed issue_identifier={IssueIdentifier} context={Context} error={Error}",
                 issueIdentifier,
                 context,
-                killError);
+                SecretRedactor.Redact(killError));
         }
 
         if (!process.HasExited)
         {
             exitedAfterKillAttempt = await WaitForExitWithGracePeriodAsync(process, KillGracePeriodMs);
-            if (!exitedAfterKillAttempt)
-            {
-                logger.LogWarning(
-                    "Process for issue {IssueIdentifier} did not exit within kill grace period ({KillGracePeriodMs}ms). Context={Context}",
-                    issueIdentifier,
-                    KillGracePeriodMs,
-                    context);
-            }
         }
 
-        return new TerminationOutcome(
-            ExitedAfterKillAttempt: exitedAfterKillAttempt,
-            KillError: killError);
+        return new TerminationOutcome(exitedAfterKillAttempt, killError);
     }
 
     private static async Task SafeAwaitReaderPumpAsync(Task readerPumpTask, int maxWaitMs)
@@ -512,16 +899,13 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         try
         {
             var completedTask = await Task.WhenAny(readerPumpTask, Task.Delay(maxWaitMs));
-            if (completedTask != readerPumpTask)
+            if (completedTask == readerPumpTask)
             {
-                return;
+                await readerPumpTask;
             }
-
-            await readerPumpTask;
         }
         catch
         {
-            // Reader pump failures are non-fatal for command results.
         }
     }
 
@@ -578,6 +962,21 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
         await WriteJsonLineAsync(writer, payload, cancellationToken);
     }
 
+    private static async Task SendResponseAsync(
+        StreamWriter writer,
+        object requestId,
+        object result,
+        CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["id"] = requestId,
+            ["result"] = result
+        });
+
+        await WriteJsonLineAsync(writer, payload, cancellationToken);
+    }
+
     private static async Task WriteJsonLineAsync(
         StreamWriter writer,
         string payload,
@@ -589,8 +988,7 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
     }
 
     private static async Task<JsonDocument> ReadResponseAsync(
-        StreamReader reader,
-        BoundedOutputBuffer stdoutBuffer,
+        ProtocolReader protocolReader,
         int expectedRequestId,
         Func<AgentRunUpdate, CancellationToken, Task>? onUpdate,
         int readTimeoutMs,
@@ -601,73 +999,355 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
             using var readCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             readCts.CancelAfter(readTimeoutMs);
 
-            string? line;
+            ProtocolLine protocolLine;
             try
             {
-                line = await reader.ReadLineAsync(readCts.Token);
+                protocolLine = await protocolReader.ReadNextAsync(readCts.Token);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                throw new TimeoutException($"Timed out waiting for app-server response to request id {expectedRequestId}.");
+                throw new RunnerFailureException("response_timeout", $"Timed out waiting for response id {expectedRequestId}.");
             }
 
-            if (line is null)
+            if (protocolLine.IsEndOfStream)
             {
-                throw new InvalidOperationException($"App-server stdout closed before response id {expectedRequestId} was received.");
+                throw new RunnerFailureException("subprocess_exit", $"App-server stdout closed before response id {expectedRequestId} was received.");
             }
 
-            stdoutBuffer.AppendLine(line);
-            await ReportUpdateAsync(
-                onUpdate,
-                new AgentRunUpdate(
-                    EventType: "stdout_line",
-                    Timestamp: DateTimeOffset.UtcNow,
-                    Message: line),
-                cancellationToken);
-
-            JsonDocument parsed;
-            try
-            {
-                parsed = JsonDocument.Parse(line);
-            }
-            catch (JsonException)
+            if (protocolLine.Document is null)
             {
                 await ReportUpdateAsync(
                     onUpdate,
                     new AgentRunUpdate(
                         EventType: "malformed",
                         Timestamp: DateTimeOffset.UtcNow,
-                        Message: line),
+                        CodexAppServerPid: protocolReader.ProcessId,
+                        Message: protocolLine.RawLine,
+                        DataJson: JsonSerializer.Serialize(new { raw = SecretRedactor.Redact(protocolLine.RawLine, protocolReader.KnownSecret) })),
                     cancellationToken);
                 continue;
             }
 
-            if (!TryGetResponseId(parsed.RootElement, out var responseId) || responseId != expectedRequestId)
+            if (TryGetResponseId(protocolLine.Document.RootElement, out var responseId) &&
+                responseId is int responseAsInt &&
+                responseAsInt == expectedRequestId)
             {
-                parsed.Dispose();
-                continue;
+                return protocolLine.Document;
             }
 
-            return parsed;
+            using (protocolLine.Document)
+            {
+                var eventName = GetEventName(protocolLine.Document.RootElement);
+                await ReportUpdateAsync(
+                    onUpdate,
+                    CreateProtocolUpdate(protocolLine.Document.RootElement, eventName, null, null, protocolReader.KnownSecret),
+                    cancellationToken);
+            }
         }
     }
 
-    private static bool TryGetResponseId(JsonElement root, out int responseId)
+    private static AgentRunUpdate CreateProtocolUpdate(
+        JsonElement message,
+        string eventName,
+        string? threadId,
+        string? turnId,
+        string? knownSecret)
     {
-        responseId = 0;
+        TryExtractUsage(message, out var usage);
+        TryExtractRateLimitsJson(message, out var rateLimitsJson);
+
+        return new AgentRunUpdate(
+            EventType: string.IsNullOrWhiteSpace(eventName) ? "other_message" : eventName,
+            Timestamp: DateTimeOffset.UtcNow,
+            ThreadId: threadId,
+            TurnId: turnId,
+            Message: SecretRedactor.Redact(ExtractMessage(message), knownSecret),
+            InputTokens: usage?.InputTokens,
+            OutputTokens: usage?.OutputTokens,
+            TotalTokens: usage?.TotalTokens,
+            RateLimitsJson: SecretRedactor.Redact(rateLimitsJson, knownSecret),
+            DataJson: SecretRedactor.Redact(message.GetRawText(), knownSecret));
+    }
+
+    private static bool TryExtractUsage(JsonElement root, out UsageSnapshot? usage)
+    {
+        foreach (var propertyName in new[] { "total_token_usage", "totalTokenUsage", "token_usage", "tokenUsage", "usage" })
+        {
+            if (!TryFindPropertyRecursive(root, propertyName, out var usageElement))
+            {
+                continue;
+            }
+
+            if (TryParseUsageObject(usageElement, out usage))
+            {
+                return true;
+            }
+        }
+
+        usage = null;
+        return false;
+    }
+
+    private static bool TryExtractRateLimitsJson(JsonElement root, out string? rateLimitsJson)
+    {
+        foreach (var propertyName in new[] { "rate_limits", "rateLimits", "rate_limit", "rateLimit" })
+        {
+            if (TryFindPropertyRecursive(root, propertyName, out var rateLimitsElement))
+            {
+                rateLimitsJson = rateLimitsElement.GetRawText();
+                return true;
+            }
+        }
+
+        rateLimitsJson = null;
+        return false;
+    }
+
+    private static bool TryFindPropertyRecursive(JsonElement element, string propertyName, out JsonElement found)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (property.NameEquals(propertyName))
+                {
+                    found = property.Value;
+                    return true;
+                }
+
+                if (property.NameEquals("last_token_usage") || property.NameEquals("lastTokenUsage"))
+                {
+                    continue;
+                }
+
+                if (TryFindPropertyRecursive(property.Value, propertyName, out found))
+                {
+                    return true;
+                }
+            }
+        }
+
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (TryFindPropertyRecursive(item, propertyName, out found))
+                {
+                    return true;
+                }
+            }
+        }
+
+        found = default;
+        return false;
+    }
+
+    private static bool TryParseUsageObject(JsonElement usageElement, out UsageSnapshot? usage)
+    {
+        if (usageElement.ValueKind != JsonValueKind.Object)
+        {
+            usage = null;
+            return false;
+        }
+
+        var inputTokens = GetOptionalInt32(usageElement, "input_tokens")
+                          ?? GetOptionalInt32(usageElement, "inputTokens")
+                          ?? GetOptionalInt32(usageElement, "prompt_tokens")
+                          ?? GetOptionalInt32(usageElement, "promptTokens");
+        var outputTokens = GetOptionalInt32(usageElement, "output_tokens")
+                           ?? GetOptionalInt32(usageElement, "outputTokens")
+                           ?? GetOptionalInt32(usageElement, "completion_tokens")
+                           ?? GetOptionalInt32(usageElement, "completionTokens");
+        var totalTokens = GetOptionalInt32(usageElement, "total_tokens")
+                          ?? GetOptionalInt32(usageElement, "totalTokens");
+
+        if (inputTokens is null && outputTokens is null && totalTokens is null)
+        {
+            usage = null;
+            return false;
+        }
+
+        usage = new UsageSnapshot(inputTokens, outputTokens, totalTokens);
+        return true;
+    }
+
+    private static int? GetOptionalInt32(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property))
+        {
+            return null;
+        }
+
+        return property.ValueKind switch
+        {
+            JsonValueKind.Number when property.TryGetInt32(out var value) => value,
+            JsonValueKind.String when int.TryParse(property.GetString(), out var value) => value,
+            _ => null
+        };
+    }
+
+    private static string GetEventName(JsonElement message)
+    {
+        return GetOptionalString(message, "method")
+               ?? GetOptionalString(message, "event")
+               ?? GetOptionalString(message, "type")
+               ?? "other_message";
+    }
+
+    private static bool IsTurnCompletedEvent(string eventName) =>
+        eventName.Contains("turn/completed", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsTurnFailedEvent(string eventName) =>
+        eventName.Contains("turn/failed", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsTurnCancelledEvent(string eventName) =>
+        eventName.Contains("turn/cancelled", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsUserInputRequired(JsonElement message, string eventName)
+    {
+        if (eventName.Contains("requestuserinput", StringComparison.OrdinalIgnoreCase) ||
+            eventName.Contains("user_input", StringComparison.OrdinalIgnoreCase) ||
+            eventName.Contains("input_required", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return HasBooleanPropertyRecursive(message, "requiresUserInput") ||
+               HasBooleanPropertyRecursive(message, "inputRequired") ||
+               HasBooleanPropertyRecursive(message, "userInputRequired");
+    }
+
+    private static bool HasBooleanPropertyRecursive(JsonElement element, string propertyName)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (property.NameEquals(propertyName) &&
+                    property.Value.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    return property.Value.GetBoolean();
+                }
+
+                if (HasBooleanPropertyRecursive(property.Value, propertyName))
+                {
+                    return true;
+                }
+            }
+        }
+
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (HasBooleanPropertyRecursive(item, propertyName))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryGetApprovalRequest(JsonElement message, string eventName, out object? requestId)
+    {
+        if (!eventName.Contains("approval", StringComparison.OrdinalIgnoreCase) ||
+            eventName.Contains("approved", StringComparison.OrdinalIgnoreCase))
+        {
+            requestId = null;
+            return false;
+        }
+
+        return TryGetResponseId(message, out requestId);
+    }
+
+    private static bool TryGetToolCall(JsonElement message, string eventName, out ToolCallRequest toolCall)
+    {
+        toolCall = new ToolCallRequest(string.Empty, string.Empty, null);
+
+        if (!eventName.Contains("tool", StringComparison.OrdinalIgnoreCase) ||
+            !eventName.Contains("call", StringComparison.OrdinalIgnoreCase) ||
+            !TryGetResponseId(message, out var requestId))
+        {
+            return false;
+        }
+
+        var payload = message.TryGetProperty("params", out var paramsElement)
+            ? paramsElement
+            : message;
+
+        string? toolName = GetOptionalString(payload, "toolName")
+                           ?? GetOptionalString(payload, "tool_name")
+                           ?? GetOptionalString(payload, "name");
+
+        if (string.IsNullOrWhiteSpace(toolName) &&
+            payload.TryGetProperty("tool", out var toolElement) &&
+            toolElement.ValueKind == JsonValueKind.Object)
+        {
+            toolName = GetOptionalString(toolElement, "name");
+        }
+
+        if (string.IsNullOrWhiteSpace(toolName))
+        {
+            return false;
+        }
+
+        string? inputJson = null;
+        foreach (var propertyName in new[] { "input", "arguments", "args", "parameters" })
+        {
+            if (payload.TryGetProperty(propertyName, out var inputElement) &&
+                inputElement.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
+            {
+                inputJson = inputElement.GetRawText();
+                break;
+            }
+        }
+
+        toolCall = new ToolCallRequest(requestId!, toolName, inputJson);
+        return true;
+    }
+
+    private static string? ExtractMessage(JsonElement message)
+    {
+        foreach (var path in new[]
+                 {
+                     new[] { "message" },
+                     new[] { "params", "message" },
+                     new[] { "result", "message" },
+                     new[] { "error", "message" },
+                     new[] { "params", "item", "text" },
+                     new[] { "result", "item", "text" }
+                 })
+        {
+            var value = GetOptionalString(message, path);
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TryGetResponseId(JsonElement root, out object? responseId)
+    {
+        responseId = null;
         if (!root.TryGetProperty("id", out var idProperty))
         {
             return false;
         }
 
-        if (idProperty.ValueKind == JsonValueKind.Number)
+        if (idProperty.ValueKind == JsonValueKind.Number && idProperty.TryGetInt32(out var intId))
         {
-            return idProperty.TryGetInt32(out responseId);
+            responseId = intId;
+            return true;
         }
 
         if (idProperty.ValueKind == JsonValueKind.String)
         {
-            return int.TryParse(idProperty.GetString(), out responseId);
+            responseId = idProperty.GetString();
+            return !string.IsNullOrWhiteSpace(responseId as string);
         }
 
         return false;
@@ -681,62 +1361,34 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
             return;
         }
 
-        throw new InvalidOperationException($"app_server_protocol_error:{operationName}:{errorProperty}");
+        throw new RunnerFailureException("response_error", $"app_server_protocol_error:{operationName}:{errorProperty}");
     }
 
     private static string GetRequiredString(JsonElement root, params string[] path)
     {
-        if (!TryGetNestedElement(root, out var value, path))
+        var value = GetOptionalString(root, path);
+        if (string.IsNullOrWhiteSpace(value))
         {
-            throw new InvalidOperationException($"Missing required protocol field '{string.Join('.', path)}'.");
+            throw new RunnerFailureException("response_error", $"Missing required protocol field '{string.Join('.', path)}'.");
         }
 
-        if (value.ValueKind != JsonValueKind.String)
-        {
-            throw new InvalidOperationException($"Protocol field '{string.Join('.', path)}' must be a string.");
-        }
-
-        var text = value.GetString();
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            throw new InvalidOperationException($"Protocol field '{string.Join('.', path)}' must be non-empty.");
-        }
-
-        return text;
+        return value;
     }
 
     private static string? GetOptionalString(JsonElement root, params string[] path)
     {
-        if (!TryGetNestedElement(root, out var value, path))
-        {
-            return null;
-        }
-
-        if (value.ValueKind != JsonValueKind.String)
-        {
-            return null;
-        }
-
-        return value.GetString();
-    }
-
-    private static bool TryGetNestedElement(JsonElement root, out JsonElement value, params string[] path)
-    {
-        value = root;
+        var current = root;
         foreach (var segment in path)
         {
-            if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(segment, out value))
+            if (current.ValueKind != JsonValueKind.Object ||
+                !current.TryGetProperty(segment, out current) ||
+                current.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
             {
-                return false;
+                return null;
             }
         }
 
-        if (value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
-        {
-            return false;
-        }
-
-        return true;
+        return current.ValueKind == JsonValueKind.String ? current.GetString() : null;
     }
 
     private static ProcessStartInfo BuildProcessStartInfo(string command, string workspacePath)
@@ -812,7 +1464,7 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
 
         if (!string.IsNullOrWhiteSpace(termination.KillError))
         {
-            stderr = AppendLine(stderr, $"Kill error: {termination.KillError}");
+            stderr = AppendLine(stderr, $"Kill error: {SecretRedactor.Redact(termination.KillError)}");
         }
 
         return stderr;
@@ -848,61 +1500,108 @@ public sealed class CodexAgentRunner(ILogger<CodexAgentRunner> logger) : IAgentR
 
     private sealed class BoundedOutputBuffer(int maxChars, string streamName)
     {
-        private readonly object _sync = new();
-        private readonly StringBuilder _builder = new();
-        private bool _truncated;
+        private readonly object sync = new();
+        private readonly StringBuilder builder = new();
+        private bool truncated;
 
         public void AppendLine(string line)
         {
-            lock (_sync)
+            lock (sync)
             {
-                if (_truncated)
+                if (truncated)
                 {
                     return;
                 }
 
-                var remaining = maxChars - _builder.Length;
+                var remaining = maxChars - builder.Length;
                 if (remaining <= 0)
                 {
-                    _truncated = true;
+                    truncated = true;
                     return;
                 }
 
                 if (line.Length + Environment.NewLine.Length <= remaining)
                 {
-                    _builder.AppendLine(line);
+                    builder.AppendLine(line);
                     return;
                 }
 
                 var charsToCopy = Math.Max(remaining - Environment.NewLine.Length, 0);
                 if (charsToCopy > 0)
                 {
-                    _builder.Append(line.AsSpan(0, Math.Min(charsToCopy, line.Length)));
-                    _builder.AppendLine();
+                    builder.Append(line.AsSpan(0, Math.Min(charsToCopy, line.Length)));
+                    builder.AppendLine();
                 }
 
-                _truncated = true;
+                truncated = true;
             }
         }
 
         public string ToText()
         {
-            lock (_sync)
+            lock (sync)
             {
-                var text = _builder.ToString().TrimEnd();
-                if (!_truncated)
+                var text = builder.ToString().TrimEnd();
+                if (!truncated)
                 {
                     return text;
                 }
 
                 var suffix = $"[{streamName} truncated at {maxChars} chars]";
-                if (string.IsNullOrWhiteSpace(text))
-                {
-                    return suffix;
-                }
-
-                return $"{text}{Environment.NewLine}{suffix}";
+                return string.IsNullOrWhiteSpace(text)
+                    ? suffix
+                    : $"{text}{Environment.NewLine}{suffix}";
             }
         }
     }
+
+    private sealed class ProtocolReader(
+        StreamReader stdout,
+        BoundedOutputBuffer stdoutBuffer,
+        int processId,
+        string? knownSecret)
+    {
+        public int ProcessId => processId;
+
+        public string? KnownSecret => knownSecret;
+
+        public async Task<ProtocolLine> ReadNextAsync(CancellationToken cancellationToken)
+        {
+            var line = await stdout.ReadLineAsync(cancellationToken);
+            if (line is null)
+            {
+                return ProtocolLine.EndOfStream();
+            }
+
+            stdoutBuffer.AppendLine(line);
+
+            try
+            {
+                return ProtocolLine.Json(line, JsonDocument.Parse(line));
+            }
+            catch (JsonException)
+            {
+                return ProtocolLine.Text(line);
+            }
+        }
+    }
+
+    private readonly record struct ProtocolLine(string? RawLine, JsonDocument? Document, bool IsEndOfStream)
+    {
+        public static ProtocolLine EndOfStream() => new(null, null, true);
+
+        public static ProtocolLine Json(string rawLine, JsonDocument document) => new(rawLine, document, false);
+
+        public static ProtocolLine Text(string rawLine) => new(rawLine, null, false);
+    }
+
+    private sealed class RunnerFailureException(string code, string message, Exception? innerException = null)
+        : Exception(message, innerException)
+    {
+        public string Code { get; } = code;
+    }
+
+    private sealed record ToolCallRequest(object RequestId, string Name, string? InputJson);
+
+    private sealed record UsageSnapshot(int? InputTokens, int? OutputTokens, int? TotalTokens);
 }

@@ -77,4 +77,21 @@ public sealed class WorkspaceHookRunnerTests
         Assert.Equal("before_run", ex.HookName);
         Assert.True(ex.IsTimeout);
     }
+
+    [Fact]
+    public async Task RunHookAsync_ShouldRemoveTemporaryHookDirectoryAfterExecution()
+    {
+        var workspace = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-hook-workspace"));
+        var runner = new WorkspaceHookRunner(NullLogger<WorkspaceHookRunner>.Instance);
+
+        await runner.RunHookAsync(
+            new WorkspaceHookRequest(
+                HookName: "before_run",
+                Script: RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "echo ok" : "printf ok",
+                WorkspacePath: workspace.FullName,
+                TimeoutMs: 5_000,
+                IssueIdentifier: "#4"));
+
+        Assert.False(Directory.Exists(Path.Combine(workspace.FullName, ".symphony-hooks")));
+    }
 }

@@ -121,7 +121,7 @@ public sealed class WorkspaceHookRunner(ILogger<WorkspaceHookRunner> logger) : I
         finally
         {
             startedAt.Stop();
-            TryDeleteFile(scriptFilePath);
+            TryDeleteFileAndParentDirectory(scriptFilePath);
         }
     }
 
@@ -211,13 +211,21 @@ public sealed class WorkspaceHookRunner(ILogger<WorkspaceHookRunner> logger) : I
         }
     }
 
-    private static void TryDeleteFile(string path)
+    private static void TryDeleteFileAndParentDirectory(string path)
     {
         try
         {
             if (File.Exists(path))
             {
                 File.Delete(path);
+            }
+
+            var parentDirectory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(parentDirectory) &&
+                Directory.Exists(parentDirectory) &&
+                !Directory.EnumerateFileSystemEntries(parentDirectory).Any())
+            {
+                Directory.Delete(parentDirectory);
             }
         }
         catch
