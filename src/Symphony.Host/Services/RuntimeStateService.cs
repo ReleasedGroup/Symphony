@@ -13,21 +13,46 @@ public sealed class RuntimeStateService(
     {
         var generatedAt = timeProvider.GetUtcNow();
         var runningRuns = (await dbContext.Runs
+            .AsNoTracking()
             .Where(run => run.Status == RunStatusNames.Running)
             .ToListAsync(cancellationToken))
             .OrderBy(run => run.StartedAtUtc)
             .ToList();
         var retryEntries = (await dbContext.RetryQueue
+            .AsNoTracking()
             .ToListAsync(cancellationToken))
             .OrderBy(entry => entry.DueAtUtc)
             .ToList();
-        var attempts = await dbContext.RunAttempts.ToListAsync(cancellationToken);
+        var attempts = await dbContext.RunAttempts
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
         var latestRateLimitsJson = (await dbContext.EventLog
+            .AsNoTracking()
             .Where(entry => entry.EventName == "rate_limits_updated" && entry.DataJson != null)
             .ToListAsync(cancellationToken))
             .OrderByDescending(entry => entry.OccurredAtUtc)
             .Select(entry => entry.DataJson)
             .FirstOrDefault();
+        var issueCacheEntries = (await dbContext.IssueCache
+            .AsNoTracking()
+            .ToListAsync(cancellationToken))
+            .OrderByDescending(entry => entry.UpdatedAtUtc ?? entry.CachedAtUtc)
+            .ToList();
+        var recentActivity = (await dbContext.EventLog
+            .AsNoTracking()
+            .ToListAsync(cancellationToken))
+            .OrderByDescending(entry => entry.OccurredAtUtc)
+            .Take(24)
+            .ToList();
+        var leases = (await dbContext.InstanceLeases
+            .AsNoTracking()
+            .ToListAsync(cancellationToken))
+            .OrderBy(entry => entry.LeaseName, StringComparer.OrdinalIgnoreCase)
+            .ThenByDescending(entry => entry.UpdatedAtUtc)
+            .ToList();
+        var issueCacheById = issueCacheEntries.ToDictionary(entry => entry.IssueId);
+        var runningIssueIds = runningRuns.Select(run => run.IssueId).ToHashSet(StringComparer.Ordinal);
+        var retryIssueIds = retryEntries.Select(entry => entry.IssueId).ToHashSet(StringComparer.Ordinal);
 
         var secondsRunning = attempts
             .Where(attempt => attempt.CompletedAtUtc.HasValue)
@@ -42,43 +67,116 @@ public sealed class RuntimeStateService(
             counts = new
             {
                 running = runningRuns.Count,
-                retrying = retryEntries.Count
+                retrying = retryEntries.Count,
+                tracked = issueCacheEntries.Count
             },
-            running = runningRuns.Select(run => new
+            running = runningRuns.Select(run =>
             {
-                issue_id = run.IssueId,
-                issue_identifier = run.IssueIdentifier,
-                state = run.State,
-                session_id = run.SessionId,
-                turn_count = run.TurnCount,
-                last_event = run.LastEvent,
-                last_message = run.LastMessage,
-                started_at = run.StartedAtUtc,
-                last_event_at = run.LastEventAtUtc,
-                tokens = new
+                issueCacheById.TryGetValue(run.IssueId, out var cachedIssue);
+                return new
                 {
-                    input_tokens = run.InputTokens,
-                    output_tokens = run.OutputTokens,
-                    total_tokens = run.TotalTokens
-                }
+                    issue_id = run.IssueId,
+                    issue_identifier = run.IssueIdentifier,
+                    title = cachedIssue?.Title,
+                    url = cachedIssue?.Url,
+                    milestone = cachedIssue?.Milestone,
+                    labels = ParseJsonValue(cachedIssue?.LabelsJson),
+                    state = run.State,
+                    session_id = run.SessionId,
+                    turn_count = run.TurnCount,
+                    last_event = run.LastEvent,
+                    last_message = run.LastMessage,
+                    started_at = run.StartedAtUtc,
+                    last_event_at = run.LastEventAtUtc,
+                    tokens = new
+                    {
+                        input_tokens = run.InputTokens,
+                        output_tokens = run.OutputTokens,
+                        total_tokens = run.TotalTokens
+                    }
+                };
             }),
-            retrying = retryEntries.Select(entry => new
+            retrying = retryEntries.Select(entry =>
             {
+                issueCacheById.TryGetValue(entry.IssueId, out var cachedIssue);
+                return new
+                {
+                    issue_id = entry.IssueId,
+                    issue_identifier = entry.IssueIdentifier,
+                    title = cachedIssue?.Title,
+                    url = cachedIssue?.Url,
+                    milestone = cachedIssue?.Milestone,
+                    labels = ParseJsonValue(cachedIssue?.LabelsJson),
+                    attempt = entry.Attempt,
+                    due_at = entry.DueAtUtc,
+                    error = entry.Error
+                };
+            }),
+            tracked = new
+            {
+                total = issueCacheEntries.Count,
+                by_state = issueCacheEntries
+                    .GroupBy(entry => string.IsNullOrWhiteSpace(entry.State) ? "Unknown" : entry.State)
+                    .OrderByDescending(group => group.Count())
+                    .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                    .Select(group => new
+                    {
+                        state = group.Key,
+                        count = group.Count()
+                    }),
+                recently_updated = issueCacheEntries
+                    .Take(18)
+                    .Select(entry => new
+                    {
+                        issue_id = entry.IssueId,
+                        issue_identifier = entry.Identifier,
+                        title = entry.Title,
+                        state = entry.State,
+                        status = retryIssueIds.Contains(entry.IssueId)
+                            ? RunStatusNames.Retrying
+                            : runningIssueIds.Contains(entry.IssueId)
+                                ? RunStatusNames.Running
+                                : "tracked",
+                        milestone = entry.Milestone,
+                        updated_at = entry.UpdatedAtUtc ?? entry.CachedAtUtc,
+                        url = entry.Url,
+                        labels = ParseJsonValue(entry.LabelsJson)
+                    })
+            },
+            activity = recentActivity.Select(entry => new
+            {
+                at = entry.OccurredAtUtc,
                 issue_id = entry.IssueId,
                 issue_identifier = entry.IssueIdentifier,
-                attempt = entry.Attempt,
-                due_at = entry.DueAtUtc,
-                error = entry.Error
+                session_id = entry.SessionId,
+                level = entry.Level,
+                @event = entry.EventName,
+                message = entry.Message
             }),
+            coordination = new
+            {
+                leases = leases.Select(entry => new
+                {
+                    lease_name = entry.LeaseName,
+                    owner_instance_id = entry.OwnerInstanceId,
+                    acquired_at = entry.AcquiredAtUtc,
+                    updated_at = entry.UpdatedAtUtc,
+                    expires_at = entry.ExpiresAtUtc,
+                    is_expired = entry.ExpiresAtUtc <= generatedAt
+                })
+            },
             codex_totals = new
             {
                 input_tokens = runningRuns.Sum(run => run.InputTokens) + await dbContext.Runs
+                    .AsNoTracking()
                     .Where(run => run.Status != RunStatusNames.Running)
                     .SumAsync(run => run.InputTokens, cancellationToken),
                 output_tokens = runningRuns.Sum(run => run.OutputTokens) + await dbContext.Runs
+                    .AsNoTracking()
                     .Where(run => run.Status != RunStatusNames.Running)
                     .SumAsync(run => run.OutputTokens, cancellationToken),
                 total_tokens = runningRuns.Sum(run => run.TotalTokens) + await dbContext.Runs
+                    .AsNoTracking()
                     .Where(run => run.Status != RunStatusNames.Running)
                     .SumAsync(run => run.TotalTokens, cancellationToken),
                 seconds_running = Math.Round(secondsRunning, 3)
@@ -92,17 +190,22 @@ public sealed class RuntimeStateService(
         CancellationToken cancellationToken)
     {
         var latestRun = (await dbContext.Runs
+            .AsNoTracking()
             .Where(run => run.IssueIdentifier == issueIdentifier)
             .ToListAsync(cancellationToken))
             .OrderByDescending(run => run.StartedAtUtc)
             .FirstOrDefault();
         var workspaceRecord = await dbContext.WorkspaceRecords
+            .AsNoTracking()
             .SingleOrDefaultAsync(record => record.IssueIdentifier == issueIdentifier, cancellationToken);
         var retryEntry = await dbContext.RetryQueue
+            .AsNoTracking()
             .SingleOrDefaultAsync(entry => entry.IssueIdentifier == issueIdentifier, cancellationToken);
         var issueCache = await dbContext.IssueCache
+            .AsNoTracking()
             .SingleOrDefaultAsync(entry => entry.Identifier == issueIdentifier, cancellationToken);
         var recentEvents = (await dbContext.EventLog
+            .AsNoTracking()
             .Where(entry => entry.IssueIdentifier == issueIdentifier)
             .ToListAsync(cancellationToken))
             .OrderByDescending(entry => entry.OccurredAtUtc)
@@ -121,6 +224,7 @@ public sealed class RuntimeStateService(
         var lastError = issueId is null
             ? null
             : (await dbContext.RunAttempts
+                .AsNoTracking()
                 .Where(attempt => attempt.IssueId == issueId && attempt.Error != null)
                 .ToListAsync(cancellationToken))
                 .OrderByDescending(attempt => attempt.CompletedAtUtc ?? attempt.StartedAtUtc)
@@ -182,9 +286,15 @@ public sealed class RuntimeStateService(
             last_error = lastError,
             tracked = new
             {
+                title = issueCache?.Title,
+                url = issueCache?.Url,
+                priority = issueCache?.Priority,
                 cache_state = issueCache?.State,
                 milestone = issueCache?.Milestone,
-                labels = ParseJsonValue(issueCache?.LabelsJson)
+                updated_at = issueCache?.UpdatedAtUtc ?? issueCache?.CachedAtUtc,
+                labels = ParseJsonValue(issueCache?.LabelsJson),
+                blocked_by = ParseJsonValue(issueCache?.BlockedByJson),
+                pull_requests = ParseJsonValue(issueCache?.PullRequestsJson)
             }
         };
 

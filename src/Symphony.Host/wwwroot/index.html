@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#041319">
+  <title>Symphony Control Room</title>
+  <link rel="stylesheet" href="/assets/dashboard.css">
+</head>
+<body>
+  <div class="pointer-events-none fixed inset-0 overflow-hidden">
+    <div class="absolute inset-0 mesh-overlay opacity-30"></div>
+    <div class="absolute -left-20 top-24 h-72 w-72 rounded-full bg-cyan-400/10 blur-3xl animate-drift"></div>
+    <div class="absolute right-0 top-10 h-80 w-80 rounded-full bg-emerald-400/10 blur-3xl animate-drift"></div>
+    <div class="absolute bottom-0 left-1/2 h-96 w-96 -translate-x-1/2 rounded-full bg-orange-400/10 blur-3xl animate-drift"></div>
+  </div>
+
+  <div class="relative min-h-screen">
+    <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+      <header id="hero-panel" class="panel animate-lift"></header>
+      <div id="dashboard-alert" class="mt-4"></div>
+
+      <main class="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_420px]">
+        <section class="space-y-6">
+          <section id="metric-grid" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"></section>
+          <div class="grid gap-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
+            <section id="live-runs" class="panel"></section>
+            <section id="issue-distribution" class="panel"></section>
+          </div>
+          <div class="grid gap-6 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+            <section id="activity-feed" class="panel"></section>
+            <section id="tracked-issues" class="panel"></section>
+          </div>
+        </section>
+
+        <aside class="space-y-6">
+          <section id="issue-detail" class="panel xl:sticky xl:top-6"></section>
+          <section id="instance-status" class="panel"></section>
+          <section id="rate-limits" class="panel"></section>
+        </aside>
+      </main>
+    </div>
+  </div>
+
+  <noscript>
+    <div class="mx-auto max-w-3xl px-4 py-10 text-sm text-slate-200">
+      Symphony Control Room requires JavaScript to render live runtime state.
+    </div>
+  </noscript>
+
+  <script type="module" src="/assets/dashboard.js"></script>
+</body>
+</html>

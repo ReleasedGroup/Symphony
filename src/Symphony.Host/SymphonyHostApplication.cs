@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Symphony.Core.Configuration;
@@ -153,8 +154,50 @@ internal static class SymphonyHostApplication
         await ValidateWorkflowDispatchPreflightAsync(app.Services, cancellationToken);
         await app.Services.ApplySymphonyMigrationsAsync();
 
+        ConfigureStaticAssets(app);
         MapRoutes(app);
         return app;
+    }
+
+    private static void ConfigureStaticAssets(WebApplication app)
+    {
+        var webRootPath = ResolveWebRootPath();
+        if (!Directory.Exists(webRootPath))
+        {
+            return;
+        }
+
+        var fileProvider = new PhysicalFileProvider(webRootPath);
+        app.UseDefaultFiles(new DefaultFilesOptions
+        {
+            FileProvider = fileProvider
+        });
+        app.UseStaticFiles(new StaticFileOptions
+        {
+            FileProvider = fileProvider
+        });
+    }
+
+    private static string ResolveWebRootPath()
+    {
+        var candidates = new List<string>
+        {
+            Path.Combine(AppContext.BaseDirectory, "wwwroot"),
+            Path.Combine(Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? AppContext.BaseDirectory, "wwwroot"),
+            Path.Combine(Directory.GetCurrentDirectory(), "wwwroot"),
+            Path.Combine(Directory.GetCurrentDirectory(), "src", "Symphony.Host", "wwwroot")
+        };
+
+        var probe = new DirectoryInfo(AppContext.BaseDirectory);
+        while (probe is not null)
+        {
+            candidates.Add(Path.Combine(probe.FullName, "wwwroot"));
+            candidates.Add(Path.Combine(probe.FullName, "src", "Symphony.Host", "wwwroot"));
+            probe = probe.Parent;
+        }
+
+        return candidates.FirstOrDefault(Directory.Exists)
+            ?? candidates[0];
     }
 
     private static void MapRoutes(WebApplication app)
@@ -304,7 +347,13 @@ internal static class SymphonyHostApplication
             });
         });
 
-        app.MapGet("/", () => Results.Redirect("/api/v1/health"));
+        app.MapGet("/", () =>
+        {
+            var dashboardPath = Path.Combine(ResolveWebRootPath(), "index.html");
+            return File.Exists(dashboardPath)
+                ? Results.File(dashboardPath, "text/html; charset=utf-8")
+                : Results.Redirect("/api/v1/health");
+        });
     }
 
     private static bool ValidateRuntimeOptions(SymphonyRuntimeOptions options)

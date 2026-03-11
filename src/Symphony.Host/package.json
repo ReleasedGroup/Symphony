@@ -1,0 +1,10 @@
+{
+  "name": "symphony-host-ui",
+  "private": true,
+  "scripts": {
+    "build:css": "tailwindcss -i ./Styles/dashboard.css -o ./wwwroot/assets/dashboard.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}

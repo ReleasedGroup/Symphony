@@ -236,6 +236,15 @@ public sealed class CodexAgentRunnerTests
         Assert.Contains("\"turn/completed\"", result.Stdout, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void CodexProtocolValueNormalizer_ShouldNormalizeSandboxValuesForCurrentAppServerProtocol()
+    {
+        Assert.Equal("danger-full-access", CodexProtocolValueNormalizer.NormalizeThreadSandbox("dangerFullAccess"));
+        Assert.Equal("workspace-write", CodexProtocolValueNormalizer.NormalizeThreadSandbox("workspaceWrite"));
+        Assert.Equal("dangerFullAccess", CodexProtocolValueNormalizer.GetTurnSandboxPolicyType("danger-full-access"));
+        Assert.Equal("readOnly", CodexProtocolValueNormalizer.GetTurnSandboxPolicyType("read-only"));
+    }
+
     private static CodexAgentRunner CreateRunner(ITrackerClient? trackerClient = null)
     {
         return new CodexAgentRunner(trackerClient ?? new SequencedTrackerClient([]), NullLogger<CodexAgentRunner>.Instance);
@@ -248,7 +257,9 @@ public sealed class CodexAgentRunnerTests
         string command,
         int timeoutMs,
         int maxTurns = 1,
-        TrackerQuery? trackerQuery = null)
+        TrackerQuery? trackerQuery = null,
+        string threadSandbox = "danger-full-access",
+        string turnSandboxPolicy = "danger-full-access")
     {
         return new AgentRunRequest(
             IssueId: issueId,
@@ -260,8 +271,8 @@ public sealed class CodexAgentRunnerTests
             TimeoutMs: timeoutMs,
             MaxTurns: maxTurns,
             ApprovalPolicy: "never",
-            ThreadSandbox: "danger-full-access",
-            TurnSandboxPolicy: "danger-full-access",
+            ThreadSandbox: threadSandbox,
+            TurnSandboxPolicy: turnSandboxPolicy,
             ReadTimeoutMs: 5_000,
             TrackerQuery: trackerQuery);
     }

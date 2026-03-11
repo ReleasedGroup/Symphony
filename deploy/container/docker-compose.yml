@@ -1,0 +1,31 @@
+services:
+  symphony:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        CODEX_NPM_VERSION: ${CODEX_NPM_VERSION:-0.114.0}
+    image: ${SYMPHONY_IMAGE:-symphony:dev}
+    restart: unless-stopped
+    ports:
+      - "${SYMPHONY_HTTP_PORT:-8080}:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+      SYMPHONY_WORKFLOW_PATH: /config/WORKFLOW.md
+      Persistence__ConnectionString: "Data Source=/var/lib/symphony/data/symphony.db;Cache=Shared;Mode=ReadWriteCreate"
+      Orchestration__InstanceId: ${SYMPHONY_INSTANCE_ID:-orchestrator-1}
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+    volumes:
+      - ${SYMPHONY_WORKFLOW_HOST_PATH}:/config/WORKFLOW.md:ro
+      - symphony-data:/var/lib/symphony
+      - ${CODEX_HOME_HOST_PATH}:/home/symphony/.codex
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  symphony-data:

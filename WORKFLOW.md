@@ -3,8 +3,8 @@ tracker:
   kind: github
   endpoint: https://api.github.com/graphql
   api_key: $GITHUB_TOKEN
-  owner: your-github-owner
-  repo: your-github-repo
+  owner: releasedgroup
+  repo: nextmedia-manager-copilot
   milestone: null
   include_pull_requests: true
   labels: []
@@ -32,9 +32,9 @@ codex:
   read_timeout_ms: 5000
   stall_timeout_ms: 300000
 workspace:
-  root: ./workspaces
-  shared_clone_path: ./workspaces/repo
-  worktrees_root: ./workspaces/worktrees
+  root: /s/workspaces
+  shared_clone_path: /s/workspaces/repo
+  worktrees_root: /s/workspaces/worktrees
   base_branch: main
   remote_url: null
 hooks:
@@ -48,7 +48,13 @@ hooks:
 
 You are working on a GitHub issue for this repository.
 
-- Read the issue details, labels, milestone, and linked pull request context.
+- Read the issue details, labels, milestone, and linked pull request context. Ensure you read any comments and also any embedded images or attachments.
+- If this change is dependent on a change that has not yet completed, wait until that change complets before starting.
 - Implement the requested change in the current worktree.
 - Run relevant build/tests before completion.
 - Keep changes minimal, correct, and safe.
+- Ensure on completion you publish a PR with detailed descriptions of what was done and mark it as ready to review. Also add the text Closes #xx where xx is the issue number.
+- Add a comment to the issue to show you are working on it
+- Once you publish a PR, Copilot will review it and add comments. This may take some time.
+- Once Copilot has commented, review and resolve the comments
+- Once the comments are resolved, build and test works and there are no more issues, merge the PR
