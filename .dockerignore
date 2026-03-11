@@ -1,0 +1,9 @@
+.git
+.vs/
+.vscode/
+**/bin/
+**/obj/
+tests/
+src/Symphony.Host/data/
+src/Symphony.Host/workspaces/
+deploy/container/.env

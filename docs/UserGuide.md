@@ -9,6 +9,7 @@ In v1, Symphony ships with:
 - GitHub PAT authentication
 - EF Core + SQLite persistence
 - Worker + HTTP API hosting
+- Responsive dashboard UI served by the host root path
 - Shared clone + per-issue git worktrees
 - Permissive auto-approval for supported Codex approval requests
 - Optional `github_graphql` client-side tool support during Codex sessions
@@ -16,6 +17,18 @@ In v1, Symphony ships with:
 ## Quick Start
 
 1. Set `GITHUB_TOKEN` in the environment.
+   In PowerShell, set it in the same terminal session that will start Symphony:
+
+```powershell
+$env:GITHUB_TOKEN = "<token>"
+```
+
+   Verify the host process will see it before running:
+
+```powershell
+if ([string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) { throw "GITHUB_TOKEN is not set." }
+```
+
 2. Edit [`WORKFLOW.md`](../WORKFLOW.md) with your GitHub owner/repo and any label or milestone filters.
 3. Restore tools and build:
 
@@ -27,10 +40,22 @@ dotnet build Symphony.slnx --warnaserror
 4. Run locally:
 
 ```powershell
-dotnet run --project src/Symphony.Host -- ./WORKFLOW.md
+dotnet run --project src/Symphony.Host
 ```
 
-5. Open the health endpoint:
+The repository launch profile already supplies `../../WORKFLOW.md`. If you want to pass the workflow path explicitly from the repository root, use:
+
+```powershell
+dotnet run --project src/Symphony.Host -- ../../WORKFLOW.md
+```
+
+5. Open the dashboard:
+
+```text
+http://127.0.0.1:<port>/
+```
+
+If you need the raw probe, the health endpoint remains available at:
 
 ```text
 http://127.0.0.1:<port>/api/v1/health
@@ -39,6 +64,8 @@ http://127.0.0.1:<port>/api/v1/health
 ## Workflow Settings
 
 Symphony reads its runtime behavior from [`WORKFLOW.md`](../WORKFLOW.md).
+
+When you use `dotnet run --project src/Symphony.Host`, the default SQLite file path from `appsettings.json` is created under `src/Symphony.Host/data/` if it is missing.
 
 Important settings:
 
@@ -54,13 +81,20 @@ Important settings:
 
 `tracker.api_key` supports `$ENV_VAR` indirection. Symphony validates that required secrets exist without logging their values.
 
+If you see `missing_tracker_api_key`, the workflow value usually looks correct and the problem is that the current host process does not have the referenced environment variable. This often happens when:
+
+- `GITHUB_TOKEN` was set in one shell but `dotnet run` was started from another shell, the IDE, or a Windows Service
+- the variable name in `WORKFLOW.md` does not exactly match the environment variable name
+- the variable is present but empty or whitespace
+
 ## Runtime API
 
 Symphony exposes these HTTP endpoints:
 
+- `GET /`: dashboard for host health, workload, tokens, activity, leases, and issue drill-down
 - `GET /api/v1/health`: liveness/health checks
 - `GET /api/v1/runtime`: current workflow/config snapshot
-- `GET /api/v1/state`: running sessions, retry queue, token totals, runtime totals, and latest rate limits
+- `GET /api/v1/state`: running sessions, retry queue, tracked issue distribution, recent activity, lease state, token totals, runtime totals, and latest rate limits
 - `GET /api/v1/<issue_identifier>`: issue-specific runtime/debug view
 - `POST /api/v1/refresh`: queue an immediate best-effort poll/reconcile cycle
 
@@ -144,3 +178,23 @@ dotnet test tests/Symphony.Integration.Tests/Symphony.Integration.Tests.csproj -
 ```
 
 If the opt-in flag is not set, the real integration test is reported as skipped.
+
+## Dashboard Assets
+
+The dashboard is a static frontend served by `src/Symphony.Host`:
+
+- Tailwind source: `src/Symphony.Host/Styles/dashboard.css`
+- Generated CSS: `src/Symphony.Host/wwwroot/assets/dashboard.css`
+- Client script: `src/Symphony.Host/wwwroot/assets/dashboard.js`
+
+To rebuild the CSS after UI changes:
+
+```powershell
+Set-Location src/Symphony.Host
+npm install
+npm run build:css
+```
+
+## Containers
+
+For container deployment, mounted workflow/config, and compose artifacts, see [ContainerGuide.md](ContainerGuide.md).

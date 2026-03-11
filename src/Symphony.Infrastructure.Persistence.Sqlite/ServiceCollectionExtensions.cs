@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Symphony.Core.Abstractions;
 using Symphony.Infrastructure.Persistence.Sqlite.Storage;
@@ -20,7 +21,12 @@ public static class ServiceCollectionExtensions
         services.AddDbContext<SymphonyDbContext>((serviceProvider, optionsBuilder) =>
         {
             var storageOptions = serviceProvider.GetRequiredService<IOptions<SqliteStorageOptions>>().Value;
-            optionsBuilder.UseSqlite(storageOptions.ConnectionString);
+            var hostEnvironment = serviceProvider.GetRequiredService<IHostEnvironment>();
+            var connectionString = SqliteConnectionStringResolver.Resolve(
+                storageOptions.ConnectionString,
+                hostEnvironment.ContentRootPath);
+
+            optionsBuilder.UseSqlite(connectionString);
         });
 
         services.AddSingleton(TimeProvider.System);

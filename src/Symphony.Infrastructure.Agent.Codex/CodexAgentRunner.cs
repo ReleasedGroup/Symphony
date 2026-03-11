@@ -271,7 +271,7 @@ public sealed partial class CodexAgentRunner(
                 @params: new
                 {
                     approvalPolicy = request.ApprovalPolicy,
-                    sandbox = request.ThreadSandbox,
+                    sandbox = CodexProtocolValueNormalizer.NormalizeThreadSandbox(request.ThreadSandbox),
                     cwd = request.WorkspacePath,
                     tools = BuildAdvertisedTools(request)
                 },
@@ -315,7 +315,7 @@ public sealed partial class CodexAgentRunner(
                         approvalPolicy = request.ApprovalPolicy,
                         sandboxPolicy = new
                         {
-                            type = request.TurnSandboxPolicy
+                            type = CodexProtocolValueNormalizer.GetTurnSandboxPolicyType(request.TurnSandboxPolicy)
                         }
                     },
                     cancellationToken);

@@ -194,6 +194,47 @@ public sealed class HostLifecycleTests
         }
     }
 
+    [Fact]
+    public async Task RunCliAsync_ShouldCreateDefaultSqliteDirectoryWhenMissing()
+    {
+        var tempDirectory = CreateTempDirectory();
+        var workflowPath = Path.Combine(tempDirectory, "WORKFLOW.md");
+        var databaseDirectory = Path.Combine(tempDirectory, "data");
+        var databasePath = Path.Combine(databaseDirectory, "symphony.db");
+        var stderr = new StringWriter();
+        var trackerClient = new FakeGitHubTrackerClient();
+
+        await File.WriteAllTextAsync(workflowPath, CreateWorkflowContent(serverPort: 0));
+
+        try
+        {
+            using var currentDirectory = new CurrentDirectoryScope(tempDirectory);
+            var exitCode = await SymphonyHostApplication.RunCliAsync(
+                [],
+                stderr,
+                configureServices: services =>
+                {
+                    services.AddSingleton<ITrackerClient>(trackerClient);
+                    services.AddSingleton<IGitHubTrackerClient>(trackerClient);
+                },
+                runApplicationAsync: async (app, cancellationToken) =>
+                {
+                    await app.StartAsync(cancellationToken);
+                    await app.StopAsync(cancellationToken);
+                });
+
+            Assert.True(exitCode == 0, stderr.ToString());
+            Assert.True(Directory.Exists(databaseDirectory));
+            Assert.True(File.Exists(databasePath));
+            Assert.Equal(string.Empty, stderr.ToString());
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(tempDirectory, recursive: true);
+        }
+    }
+
     private static void AddTestConfiguration(WebApplicationBuilder builder, string dbPath)
     {
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>

@@ -117,6 +117,9 @@ public sealed class ApiSmokeTests
             Assert.True(exitCode == 0, stderr.ToString());
             Assert.NotNull(content);
             Assert.Contains("\"counts\"", content, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("\"tracked\"", content, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("\"activity\"", content, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("\"coordination\"", content, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("\"codex_totals\"", content, StringComparison.OrdinalIgnoreCase);
         }
         finally
@@ -158,6 +161,45 @@ public sealed class ApiSmokeTests
             Assert.NotNull(content);
             Assert.Contains("\"queued\":true", content, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("\"operations\"", content, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            TryDeleteFile(dbPath);
+            TryDeleteFile(workflowPath);
+        }
+    }
+
+    [Fact]
+    public async Task RootEndpoint_ShouldServeDashboardHtml()
+    {
+        var workflowPath = CreateValidWorkflowPath();
+        var dbPath = Path.Combine(Path.GetTempPath(), $"symphony-int-{Guid.NewGuid():N}.db");
+        var stderr = new StringWriter();
+        HttpStatusCode? statusCode = null;
+        string? content = null;
+
+        try
+        {
+            var exitCode = await SymphonyHostApplication.RunCliAsync(
+                [workflowPath],
+                stderr,
+                configureBuilder: builder => ConfigureTestServer(builder, dbPath),
+                configureServices: services => RegisterFakeTracker(services),
+                runApplicationAsync: async (app, cancellationToken) =>
+                {
+                    await app.StartAsync(cancellationToken);
+                    using var client = app.GetTestClient();
+                    var response = await client.GetAsync("/", cancellationToken);
+                    statusCode = response.StatusCode;
+                    content = await response.Content.ReadAsStringAsync(cancellationToken);
+                    await app.StopAsync(cancellationToken);
+                });
+
+            Assert.True(exitCode == 0, stderr.ToString());
+            Assert.Equal(HttpStatusCode.OK, statusCode);
+            Assert.NotNull(content);
+            Assert.Contains("Symphony Control Room", content, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
@@ -385,6 +427,28 @@ public sealed class ApiSmokeTests
             Level = "Information",
             Message = "Working on tests",
             OccurredAtUtc = DateTimeOffset.UtcNow
+        });
+        dbContext.IssueCache.Add(new IssueCacheEntity
+        {
+            IssueId = "issue-1",
+            Identifier = issueIdentifier,
+            Title = "Add runtime dashboard",
+            State = "Open",
+            Url = "https://github.com/released/symphony/issues/649",
+            Milestone = "Sprint 12",
+            LabelsJson = "[\"dashboard\",\"ui\"]",
+            PullRequestsJson = "[]",
+            BlockedByJson = "[]",
+            CachedAtUtc = DateTimeOffset.UtcNow,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        });
+        dbContext.InstanceLeases.Add(new InstanceLeaseEntity
+        {
+            LeaseName = "poll-dispatch",
+            OwnerInstanceId = "instance-1",
+            AcquiredAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1),
+            UpdatedAtUtc = DateTimeOffset.UtcNow,
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(10)
         });
 
         await dbContext.SaveChangesAsync();
