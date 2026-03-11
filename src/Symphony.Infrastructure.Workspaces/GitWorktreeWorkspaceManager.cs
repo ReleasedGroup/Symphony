@@ -1,13 +1,12 @@
 using System.Diagnostics;
 using System.Text;
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Symphony.Core.Abstractions;
 using Symphony.Core.Models;
 
 namespace Symphony.Infrastructure.Workspaces;
 
-public sealed partial class GitWorktreeWorkspaceManager(
+public sealed class GitWorktreeWorkspaceManager(
     IWorkspaceHookRunner workspaceHookRunner,
     ILogger<GitWorktreeWorkspaceManager> logger) : IWorkspaceManager
 {
@@ -25,19 +24,23 @@ public sealed partial class GitWorktreeWorkspaceManager(
             throw new InvalidOperationException("workspace.remote_url could not be resolved.");
         }
 
-        var rootPath = GetAbsolutePath(request.WorkspaceRoot);
-        var sharedClonePath = GetAbsolutePath(request.SharedClonePath);
-        var worktreesRootPath = GetAbsolutePath(request.WorktreesRoot);
-        var issueKey = SanitizeIssueIdentifier(request.IssueIdentifier);
+        var rootPath = WorkspacePathSafety.GetAbsolutePath(request.WorkspaceRoot);
+        var sharedClonePath = WorkspacePathSafety.GetAbsolutePath(request.SharedClonePath);
+        var worktreesRootPath = WorkspacePathSafety.GetAbsolutePath(request.WorktreesRoot);
+        var issueKey = WorkspacePathSafety.SanitizeIssueIdentifier(request.IssueIdentifier);
         var worktreePath = Path.Combine(worktreesRootPath, issueKey);
         var branchName = string.IsNullOrWhiteSpace(request.SuggestedBranchName)
             ? $"symphony/{issueKey}"
             : request.SuggestedBranchName.Trim();
 
-        EnsurePathIsWithinRoot(rootPath, sharedClonePath);
-        EnsurePathIsWithinRoot(rootPath, worktreesRootPath);
-        EnsurePathIsWithinRoot(worktreesRootPath, worktreePath);
+        WorkspacePathSafety.EnsurePathIsWithinRoot(rootPath, sharedClonePath);
+        WorkspacePathSafety.EnsurePathIsWithinRoot(rootPath, worktreesRootPath);
+        WorkspacePathSafety.EnsurePathIsWithinRoot(worktreesRootPath, worktreePath);
 
+        EnsureDirectoryPathAvailable(rootPath, "workspace.root");
+        EnsureDirectoryPathAvailable(worktreesRootPath, "workspace.worktrees_root");
+        EnsureDirectoryPathAvailable(sharedClonePath, "workspace.shared_clone_path");
+        EnsureDirectoryPathAvailable(worktreePath, $"workspace for issue '{request.IssueIdentifier}'");
         Directory.CreateDirectory(rootPath);
         Directory.CreateDirectory(worktreesRootPath);
 
@@ -54,17 +57,29 @@ public sealed partial class GitWorktreeWorkspaceManager(
             return new WorkspacePreparationResult(worktreePath, branchName, CreatedNow: false);
         }
 
-        var hasLocalBranch = await HasLocalBranchAsync(sharedClonePath, branchName, cancellationToken);
-        if (hasLocalBranch)
+        try
         {
-            await RunGitAsync(sharedClonePath, ["worktree", "add", worktreePath, branchName], cancellationToken);
+            var hasLocalBranch = await HasLocalBranchAsync(sharedClonePath, branchName, cancellationToken);
+            if (hasLocalBranch)
+            {
+                await RunGitAsync(sharedClonePath, ["worktree", "add", worktreePath, branchName], cancellationToken);
+            }
+            else
+            {
+                await RunGitAsync(
+                    sharedClonePath,
+                    ["worktree", "add", "-b", branchName, worktreePath, $"origin/{request.BaseBranch}"],
+                    cancellationToken);
+            }
         }
-        else
+        catch
         {
-            await RunGitAsync(
-                sharedClonePath,
-                ["worktree", "add", "-b", branchName, worktreePath, $"origin/{request.BaseBranch}"],
-                cancellationToken);
+            if (Directory.Exists(worktreePath))
+            {
+                _ = await RemoveWorktreePathAsync(sharedClonePath, worktreePath, CancellationToken.None);
+            }
+
+            throw;
         }
 
         logger.LogInformation(
@@ -95,15 +110,20 @@ public sealed partial class GitWorktreeWorkspaceManager(
             throw new InvalidOperationException("workspace.shared_clone_path must be configured.");
         }
 
-        var rootPath = GetAbsolutePath(request.WorkspaceRoot);
-        var sharedClonePath = GetAbsolutePath(request.SharedClonePath);
-        var worktreesRootPath = GetAbsolutePath(request.WorktreesRoot);
-        var issueKey = SanitizeIssueIdentifier(request.IssueIdentifier);
+        var rootPath = WorkspacePathSafety.GetAbsolutePath(request.WorkspaceRoot);
+        var sharedClonePath = WorkspacePathSafety.GetAbsolutePath(request.SharedClonePath);
+        var worktreesRootPath = WorkspacePathSafety.GetAbsolutePath(request.WorktreesRoot);
+        var issueKey = WorkspacePathSafety.SanitizeIssueIdentifier(request.IssueIdentifier);
         var worktreePath = Path.Combine(worktreesRootPath, issueKey);
 
-        EnsurePathIsWithinRoot(rootPath, sharedClonePath);
-        EnsurePathIsWithinRoot(rootPath, worktreesRootPath);
-        EnsurePathIsWithinRoot(worktreesRootPath, worktreePath);
+        WorkspacePathSafety.EnsurePathIsWithinRoot(rootPath, sharedClonePath);
+        WorkspacePathSafety.EnsurePathIsWithinRoot(rootPath, worktreesRootPath);
+        WorkspacePathSafety.EnsurePathIsWithinRoot(worktreesRootPath, worktreePath);
+
+        if (File.Exists(worktreePath))
+        {
+            throw new InvalidOperationException($"Workspace path collision detected for issue '{request.IssueIdentifier}'.");
+        }
 
         if (!Directory.Exists(worktreePath))
         {
@@ -158,33 +178,13 @@ public sealed partial class GitWorktreeWorkspaceManager(
             RemovedNow: removedNow);
     }
 
-    private static string GetAbsolutePath(string path) =>
-        Path.GetFullPath(path);
-
-    private static void EnsurePathIsWithinRoot(string rootPath, string candidatePath)
-    {
-        var root = Path.GetFullPath(rootPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var candidate = Path.GetFullPath(candidatePath);
-        var rootWithSeparator = root + Path.DirectorySeparatorChar;
-        if (!candidate.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase) &&
-            !candidate.Equals(root, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException($"Path '{candidatePath}' must be within root '{rootPath}'.");
-        }
-    }
-
-    private static string SanitizeIssueIdentifier(string issueIdentifier)
-    {
-        var input = string.IsNullOrWhiteSpace(issueIdentifier) ? "issue" : issueIdentifier.Trim();
-        var sanitized = IssueIdentifierRegex().Replace(input, "-").Trim('-');
-        return string.IsNullOrWhiteSpace(sanitized) ? "issue" : sanitized.ToLowerInvariant();
-    }
-
     private async Task EnsureSharedCloneAsync(
         string sharedClonePath,
         string remoteRepositoryUrl,
         CancellationToken cancellationToken)
     {
+        EnsureDirectoryPathAvailable(sharedClonePath, "workspace.shared_clone_path");
+
         var gitDirectoryPath = Path.Combine(sharedClonePath, ".git");
         if (Directory.Exists(gitDirectoryPath))
         {
@@ -333,6 +333,14 @@ public sealed partial class GitWorktreeWorkspaceManager(
 
     private sealed record GitResult(int ExitCode, string Stdout, string Stderr);
 
+    private static void EnsureDirectoryPathAvailable(string path, string logicalName)
+    {
+        if (File.Exists(path))
+        {
+            throw new InvalidOperationException($"Configured {logicalName} path '{path}' already exists as a file.");
+        }
+    }
+
     private static string TruncateForLog(string value, int maxLength)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -348,7 +356,4 @@ public sealed partial class GitWorktreeWorkspaceManager(
 
         return $"{trimmed[..maxLength]}...";
     }
-
-    [GeneratedRegex(@"[^a-zA-Z0-9._-]+")]
-    private static partial Regex IssueIdentifierRegex();
 }

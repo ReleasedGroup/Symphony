@@ -97,6 +97,15 @@ public sealed class IssueExecutionCoordinator(
                 timeProvider.GetUtcNow(),
                 cancellationToken);
 
+            WorkspacePathSafety.EnsurePathIsWithinRoot(
+                request.WorkflowDefinition.Runtime.Workspace.Root,
+                workspace.WorkspacePath);
+
+            if (!Directory.Exists(workspace.WorkspacePath))
+            {
+                throw new InvalidOperationException($"Workspace path does not exist: {workspace.WorkspacePath}");
+            }
+
             if (workspace.CreatedNow)
             {
                 await RunRequiredHookAsync(
@@ -123,18 +132,25 @@ public sealed class IssueExecutionCoordinator(
                 request.Issue,
                 request.Attempt);
 
+            var trackerQuery = BuildTrackerQuery(
+                request.WorkflowDefinition,
+                WorkflowDispatchPreflightValidator.ValidateAndResolveApiKey(request.WorkflowDefinition));
+
             var result = await agentRunner.RunIssueAsync(
                 new AgentRunRequest(
                     request.Issue.Id,
                     request.Issue.Identifier,
+                    request.Issue.Title,
                     workspace.WorkspacePath,
                     prompt,
                     request.WorkflowDefinition.Runtime.Codex.Command,
                     request.WorkflowDefinition.Runtime.Codex.TurnTimeoutMs,
+                    request.WorkflowDefinition.Runtime.Agent.MaxTurns,
                     request.WorkflowDefinition.Runtime.Codex.ApprovalPolicy,
                     request.WorkflowDefinition.Runtime.Codex.ThreadSandbox,
                     request.WorkflowDefinition.Runtime.Codex.TurnSandboxPolicy,
-                    request.WorkflowDefinition.Runtime.Codex.ReadTimeoutMs),
+                    request.WorkflowDefinition.Runtime.Codex.ReadTimeoutMs,
+                    trackerQuery),
                 (update, token) => PersistAgentUpdateAsync(request, update, token),
                 cancellationToken);
 
@@ -150,20 +166,20 @@ public sealed class IssueExecutionCoordinator(
             else
             {
                 finalStatus = ClassifyFailureStatus(result);
-                finalError = Truncate(result.Stderr, 2_000);
+                finalError = SecretRedactor.Redact(Truncate(result.Stderr, 2_000));
                 retryPlan = CreateFailureRetryPlan(request.Attempt, finalError, request.WorkflowDefinition.Runtime.Agent.MaxRetryBackoffMs);
             }
         }
         catch (WorkflowLoadException ex)
         {
             finalStatus = RunStatusNames.Failed;
-            finalError = $"{ex.Code}: {ex.Message}";
+            finalError = SecretRedactor.Redact($"{ex.Code}: {ex.Message}");
             retryPlan = CreateFailureRetryPlan(request.Attempt, finalError, request.WorkflowDefinition.Runtime.Agent.MaxRetryBackoffMs);
         }
         catch (WorkspaceHookExecutionException ex)
         {
             finalStatus = RunStatusNames.Failed;
-            finalError = $"{ex.HookName}: {ex.Message}";
+            finalError = SecretRedactor.Redact($"{ex.HookName}: {ex.Message}");
             retryPlan = CreateFailureRetryPlan(request.Attempt, finalError, request.WorkflowDefinition.Runtime.Agent.MaxRetryBackoffMs);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -200,7 +216,7 @@ public sealed class IssueExecutionCoordinator(
         catch (Exception ex)
         {
             finalStatus = RunStatusNames.Failed;
-            finalError = Truncate(ex.Message, 2_000);
+            finalError = SecretRedactor.Redact(Truncate(ex.Message, 2_000));
             retryPlan = CreateFailureRetryPlan(request.Attempt, finalError, request.WorkflowDefinition.Runtime.Agent.MaxRetryBackoffMs);
         }
         finally
@@ -298,24 +314,11 @@ public sealed class IssueExecutionCoordinator(
         }
 
         run.LastEvent = update.EventType;
-        run.LastMessage = Truncate(update.Message, 500);
+        run.LastMessage = SecretRedactor.Redact(Truncate(update.Message, 500));
         run.LastEventAtUtc = update.Timestamp;
-        run.SessionId ??= update.SessionId;
+        run.SessionId = update.SessionId ?? run.SessionId;
 
-        if (update.InputTokens.HasValue)
-        {
-            run.InputTokens = update.InputTokens.Value;
-        }
-
-        if (update.OutputTokens.HasValue)
-        {
-            run.OutputTokens = update.OutputTokens.Value;
-        }
-
-        if (update.TotalTokens.HasValue)
-        {
-            run.TotalTokens = update.TotalTokens.Value;
-        }
+        ApplyTokenTotals(run, update);
 
         if (string.Equals(update.EventType, "session_started", StringComparison.OrdinalIgnoreCase))
         {
@@ -340,10 +343,7 @@ public sealed class IssueExecutionCoordinator(
                     CodexAppServerPid = update.CodexAppServerPid?.ToString(),
                     LastCodexEvent = update.EventType,
                     LastCodexTimestamp = update.Timestamp,
-                    LastCodexMessage = Truncate(update.Message, 500),
-                    CodexInputTokens = update.InputTokens ?? 0,
-                    CodexOutputTokens = update.OutputTokens ?? 0,
-                    CodexTotalTokens = update.TotalTokens ?? 0,
+                    LastCodexMessage = SecretRedactor.Redact(Truncate(update.Message, 500)),
                     CreatedAtUtc = update.Timestamp,
                     UpdatedAtUtc = update.Timestamp,
                     TurnCount = string.Equals(update.EventType, "session_started", StringComparison.OrdinalIgnoreCase) ? 1 : 0
@@ -358,10 +358,7 @@ public sealed class IssueExecutionCoordinator(
                 session.CodexAppServerPid = update.CodexAppServerPid?.ToString() ?? session.CodexAppServerPid;
                 session.LastCodexEvent = update.EventType;
                 session.LastCodexTimestamp = update.Timestamp;
-                session.LastCodexMessage = Truncate(update.Message, 500);
-                session.CodexInputTokens = update.InputTokens ?? session.CodexInputTokens;
-                session.CodexOutputTokens = update.OutputTokens ?? session.CodexOutputTokens;
-                session.CodexTotalTokens = update.TotalTokens ?? session.CodexTotalTokens;
+                session.LastCodexMessage = SecretRedactor.Redact(Truncate(update.Message, 500));
                 session.UpdatedAtUtc = update.Timestamp;
 
                 if (string.Equals(update.EventType, "session_started", StringComparison.OrdinalIgnoreCase))
@@ -369,6 +366,26 @@ public sealed class IssueExecutionCoordinator(
                     session.TurnCount += 1;
                 }
             }
+
+            ApplyTokenTotals(session, update);
+        }
+
+        dbContext.EventLog.Add(CreateAgentEventLogEntry(request, update));
+        if (!string.IsNullOrWhiteSpace(update.RateLimitsJson))
+        {
+            dbContext.EventLog.Add(new EventLogEntity
+            {
+                IssueId = request.Issue.Id,
+                IssueIdentifier = request.Issue.Identifier,
+                RunId = request.RunId,
+                RunAttemptId = request.AttemptId,
+                SessionId = update.SessionId,
+                EventName = "rate_limits_updated",
+                Level = LogLevel.Information.ToString(),
+                Message = "Rate limits updated.",
+                DataJson = update.RateLimitsJson,
+                OccurredAtUtc = update.Timestamp
+            });
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -598,6 +615,19 @@ public sealed class IssueExecutionCoordinator(
         return $"https://github.com/{owner}/{repo}.git";
     }
 
+    private static TrackerQuery BuildTrackerQuery(WorkflowDefinition workflowDefinition, string apiKey)
+    {
+        return new TrackerQuery(
+            workflowDefinition.Runtime.Tracker.Endpoint,
+            apiKey,
+            workflowDefinition.Runtime.Tracker.Owner,
+            workflowDefinition.Runtime.Tracker.Repo,
+            workflowDefinition.Runtime.Tracker.ActiveStates,
+            workflowDefinition.Runtime.Tracker.Labels,
+            workflowDefinition.Runtime.Tracker.Milestone,
+            workflowDefinition.Runtime.Tracker.IncludePullRequests);
+    }
+
     private static string? Truncate(string? value, int maxLength)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -608,6 +638,68 @@ public sealed class IssueExecutionCoordinator(
         return value.Length <= maxLength
             ? value
             : $"{value[..maxLength]}...";
+    }
+
+    private static void ApplyTokenTotals(RunEntity run, AgentRunUpdate update)
+    {
+        (run.InputTokens, run.LastReportedInputTokens) = AccumulateAbsoluteTotal(run.InputTokens, run.LastReportedInputTokens, update.InputTokens);
+        (run.OutputTokens, run.LastReportedOutputTokens) = AccumulateAbsoluteTotal(run.OutputTokens, run.LastReportedOutputTokens, update.OutputTokens);
+        (run.TotalTokens, run.LastReportedTotalTokens) = AccumulateAbsoluteTotal(run.TotalTokens, run.LastReportedTotalTokens, update.TotalTokens);
+    }
+
+    private static void ApplyTokenTotals(SessionEntity session, AgentRunUpdate update)
+    {
+        (session.CodexInputTokens, session.LastReportedInputTokens) = AccumulateAbsoluteTotal(session.CodexInputTokens, session.LastReportedInputTokens, update.InputTokens);
+        (session.CodexOutputTokens, session.LastReportedOutputTokens) = AccumulateAbsoluteTotal(session.CodexOutputTokens, session.LastReportedOutputTokens, update.OutputTokens);
+        (session.CodexTotalTokens, session.LastReportedTotalTokens) = AccumulateAbsoluteTotal(session.CodexTotalTokens, session.LastReportedTotalTokens, update.TotalTokens);
+    }
+
+    private static (int AccumulatedTotal, int LastReportedTotal) AccumulateAbsoluteTotal(
+        int accumulatedTotal,
+        int lastReportedTotal,
+        int? nextObservedTotal)
+    {
+        if (!nextObservedTotal.HasValue)
+        {
+            return (accumulatedTotal, lastReportedTotal);
+        }
+
+        var normalizedObservedTotal = Math.Max(nextObservedTotal.Value, lastReportedTotal);
+        accumulatedTotal += Math.Max(normalizedObservedTotal - lastReportedTotal, 0);
+        return (accumulatedTotal, normalizedObservedTotal);
+    }
+
+    private static EventLogEntity CreateAgentEventLogEntry(IssueExecutionRequest request, AgentRunUpdate update)
+    {
+        var level = update.EventType switch
+        {
+            "turn_failed" or "turn_cancelled" or "turn_input_required" => LogLevel.Warning,
+            "malformed" or "unsupported_tool_call" or "tool_call_failed" => LogLevel.Warning,
+            _ => LogLevel.Information
+        };
+
+        var message = SecretRedactor.Redact(Truncate(update.Message, 500)) ?? update.EventType;
+        var dataJson = update.DataJson;
+        if (!string.IsNullOrWhiteSpace(update.RateLimitsJson))
+        {
+            dataJson = update.DataJson is null
+                ? JsonSerializer.Serialize(new { rate_limits = JsonDocument.Parse(update.RateLimitsJson).RootElement.Clone() })
+                : update.DataJson;
+        }
+
+        return new EventLogEntity
+        {
+            IssueId = request.Issue.Id,
+            IssueIdentifier = request.Issue.Identifier,
+            RunId = request.RunId,
+            RunAttemptId = request.AttemptId,
+            SessionId = update.SessionId,
+            EventName = update.EventType,
+            Level = level.ToString(),
+            Message = message,
+            DataJson = dataJson,
+            OccurredAtUtc = update.Timestamp
+        };
     }
 
     private static async Task RunRequiredHookAsync(

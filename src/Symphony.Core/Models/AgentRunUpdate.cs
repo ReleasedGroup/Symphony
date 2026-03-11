@@ -9,7 +9,9 @@ public sealed record AgentRunUpdate(
     string? Message = null,
     int? InputTokens = null,
     int? OutputTokens = null,
-    int? TotalTokens = null)
+    int? TotalTokens = null,
+    string? RateLimitsJson = null,
+    string? DataJson = null)
 {
     public string? SessionId =>
         string.IsNullOrWhiteSpace(ThreadId) || string.IsNullOrWhiteSpace(TurnId)

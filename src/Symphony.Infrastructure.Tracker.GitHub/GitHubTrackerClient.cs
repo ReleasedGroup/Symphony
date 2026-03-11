@@ -1,12 +1,14 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Symphony.Core.Abstractions;
 using Symphony.Core.Models;
 
 namespace Symphony.Infrastructure.Tracker.GitHub;
 
-public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHubTrackerClient
+public sealed partial class GitHubTrackerClient(HttpClient httpClient) : ITrackerClient, IGitHubTrackerClient
 {
     private const string GraphQlIssuesQuery = """
         query($owner: String!, $repo: String!, $states: [IssueState!], $labels: [String!], $first: Int!, $after: String, $includePullRequests: Boolean!) {
@@ -188,6 +190,125 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         }
 
         return result;
+    }
+
+    public async Task<GitHubGraphQlExecutionResult> ExecuteGitHubGraphQlAsync(
+        TrackerQuery query,
+        string graphQlDocument,
+        string? variablesJson,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(query.ApiKey))
+        {
+            return new GitHubGraphQlExecutionResult(
+                Success: false,
+                PayloadJson: "{\"error\":\"missing_tracker_auth\"}",
+                ErrorCode: "missing_tracker_auth",
+                ErrorMessage: "GitHub tracker auth is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(graphQlDocument))
+        {
+            return new GitHubGraphQlExecutionResult(
+                Success: false,
+                PayloadJson: "{\"error\":\"invalid_graphql_document\"}",
+                ErrorCode: "invalid_graphql_document",
+                ErrorMessage: "GraphQL query must be non-empty.");
+        }
+
+        if (!ContainsSingleGraphQlOperation(graphQlDocument))
+        {
+            return new GitHubGraphQlExecutionResult(
+                Success: false,
+                PayloadJson: "{\"error\":\"invalid_graphql_document\"}",
+                ErrorCode: "invalid_graphql_document",
+                ErrorMessage: "GraphQL document must contain exactly one operation.");
+        }
+
+        JsonNode? variablesNode = null;
+        if (!string.IsNullOrWhiteSpace(variablesJson))
+        {
+            try
+            {
+                variablesNode = JsonNode.Parse(variablesJson);
+            }
+            catch (JsonException ex)
+            {
+                return new GitHubGraphQlExecutionResult(
+                    Success: false,
+                    PayloadJson: "{\"error\":\"invalid_graphql_variables\"}",
+                    ErrorCode: "invalid_graphql_variables",
+                    ErrorMessage: ex.Message);
+            }
+
+            if (variablesNode is not JsonObject)
+            {
+                return new GitHubGraphQlExecutionResult(
+                    Success: false,
+                    PayloadJson: "{\"error\":\"invalid_graphql_variables\"}",
+                    ErrorCode: "invalid_graphql_variables",
+                    ErrorMessage: "GraphQL variables must be a JSON object.");
+            }
+        }
+
+        var endpoint = string.IsNullOrWhiteSpace(query.Endpoint) ? "https://api.github.com/graphql" : query.Endpoint;
+
+        try
+        {
+            using var request = BuildGraphQlRequest(
+                endpoint,
+                query.ApiKey,
+                graphQlDocument,
+                variablesNode);
+
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            var payloadJson = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return new GitHubGraphQlExecutionResult(
+                    Success: false,
+                    PayloadJson: string.IsNullOrWhiteSpace(payloadJson)
+                        ? $"{{\"error\":\"github_api_status\",\"status\":{(int)response.StatusCode}}}"
+                        : payloadJson,
+                    ErrorCode: "github_api_status",
+                    ErrorMessage: $"GitHub GraphQL returned HTTP {(int)response.StatusCode}.");
+            }
+
+            using var payloadDocument = JsonDocument.Parse(payloadJson);
+            var success = !(payloadDocument.RootElement.TryGetProperty("errors", out var errorsElement) &&
+                            errorsElement.ValueKind == JsonValueKind.Array &&
+                            errorsElement.GetArrayLength() > 0);
+
+            return new GitHubGraphQlExecutionResult(
+                Success: success,
+                PayloadJson: payloadJson,
+                ErrorCode: success ? null : "github_graphql_errors",
+                ErrorMessage: success ? null : "GitHub GraphQL returned errors.");
+        }
+        catch (JsonException ex)
+        {
+            return new GitHubGraphQlExecutionResult(
+                Success: false,
+                PayloadJson: "{\"error\":\"github_unknown_payload\"}",
+                ErrorCode: "github_unknown_payload",
+                ErrorMessage: ex.Message);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new GitHubGraphQlExecutionResult(
+                Success: false,
+                PayloadJson: "{\"error\":\"github_api_request\"}",
+                ErrorCode: "github_api_request",
+                ErrorMessage: "GitHub GraphQL request timed out.");
+        }
+        catch (HttpRequestException ex)
+        {
+            return new GitHubGraphQlExecutionResult(
+                Success: false,
+                PayloadJson: "{\"error\":\"github_api_request\"}",
+                ErrorCode: "github_api_request",
+                ErrorMessage: ex.Message);
+        }
     }
 
     private async Task<IReadOnlyList<NormalizedIssue>> FetchIssuesInternalAsync(
@@ -480,7 +601,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         string endpoint,
         string apiKey,
         string graphQlQuery,
-        object variables)
+        object? variables)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
@@ -492,6 +613,133 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : IGitHub
         });
 
         return request;
+    }
+
+    private static bool ContainsSingleGraphQlOperation(string graphQlDocument)
+    {
+        var stripped = StripGraphQlCommentsAndStrings(graphQlDocument);
+        if (string.IsNullOrWhiteSpace(stripped))
+        {
+            return false;
+        }
+
+        var operationCount = 0;
+        var depth = 0;
+        var awaitingExplicitOperationBody = false;
+
+        for (var index = 0; index < stripped.Length; index++)
+        {
+            var current = stripped[index];
+            switch (current)
+            {
+                case '{':
+                    if (depth == 0)
+                    {
+                        if (awaitingExplicitOperationBody)
+                        {
+                            awaitingExplicitOperationBody = false;
+                        }
+                        else
+                        {
+                            operationCount++;
+                        }
+                    }
+
+                    depth++;
+                    break;
+                case '}':
+                    depth = Math.Max(depth - 1, 0);
+                    break;
+                default:
+                    if (depth != 0 || !char.IsLetter(current))
+                    {
+                        break;
+                    }
+
+                    var start = index;
+                    while (index < stripped.Length && (char.IsLetter(stripped[index]) || stripped[index] == '_'))
+                    {
+                        index++;
+                    }
+
+                    var token = stripped[start..index];
+                    if (token is "query" or "mutation" or "subscription")
+                    {
+                        operationCount++;
+                        awaitingExplicitOperationBody = true;
+                    }
+
+                    index--;
+                    break;
+            }
+
+            if (operationCount > 1)
+            {
+                return false;
+            }
+        }
+
+        return operationCount == 1;
+    }
+
+    private static string StripGraphQlCommentsAndStrings(string input)
+    {
+        var chars = new List<char>(input.Length);
+        var inString = false;
+        var inComment = false;
+        var escapeNext = false;
+
+        foreach (var current in input)
+        {
+            if (inComment)
+            {
+                if (current is '\r' or '\n')
+                {
+                    inComment = false;
+                    chars.Add(current);
+                }
+
+                continue;
+            }
+
+            if (inString)
+            {
+                if (escapeNext)
+                {
+                    escapeNext = false;
+                    continue;
+                }
+
+                if (current == '\\')
+                {
+                    escapeNext = true;
+                    continue;
+                }
+
+                if (current == '"')
+                {
+                    inString = false;
+                }
+
+                continue;
+            }
+
+            if (current == '#')
+            {
+                inComment = true;
+                continue;
+            }
+
+            if (current == '"')
+            {
+                inString = true;
+                continue;
+            }
+
+            chars.Add(current);
+        }
+
+        return new string(chars.ToArray());
     }
 
     private async Task<HttpResponseMessage> SendAsync(

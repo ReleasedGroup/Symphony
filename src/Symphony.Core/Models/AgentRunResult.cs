@@ -5,4 +5,5 @@ public sealed record AgentRunResult(
     int ExitCode,
     string Stdout,
     string Stderr,
-    TimeSpan Duration);
+    TimeSpan Duration,
+    string? ErrorCode = null);

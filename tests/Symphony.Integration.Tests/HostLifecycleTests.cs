@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Symphony.Core.Abstractions;
 using Symphony.Core.Models;
 using Symphony.Host;
 using Symphony.Infrastructure.Tracker.GitHub;
@@ -32,7 +33,11 @@ public sealed class HostLifecycleTests
                 [],
                 stderr,
                 configureBuilder: builder => AddTestConfiguration(builder, dbPath),
-                configureServices: services => services.AddSingleton<IGitHubTrackerClient>(trackerClient),
+                configureServices: services =>
+                {
+                    services.AddSingleton<ITrackerClient>(trackerClient);
+                    services.AddSingleton<IGitHubTrackerClient>(trackerClient);
+                },
                 runApplicationAsync: async (app, cancellationToken) =>
                 {
                     await app.StartAsync(cancellationToken);
@@ -41,7 +46,7 @@ public sealed class HostLifecycleTests
                     await app.StopAsync(cancellationToken);
                 });
 
-            Assert.Equal(0, exitCode);
+            Assert.True(exitCode == 0, stderr.ToString());
             Assert.Equal(Path.GetFullPath(workflowPath), loadedWorkflowPath);
             Assert.Single(urls);
             Assert.StartsWith("http://127.0.0.1:", urls[0], StringComparison.OrdinalIgnoreCase);
@@ -75,7 +80,11 @@ public sealed class HostLifecycleTests
                 ["--port", "0", workflowPath],
                 stderr,
                 configureBuilder: builder => AddTestConfiguration(builder, dbPath),
-                configureServices: services => services.AddSingleton<IGitHubTrackerClient>(trackerClient),
+                configureServices: services =>
+                {
+                    services.AddSingleton<ITrackerClient>(trackerClient);
+                    services.AddSingleton<IGitHubTrackerClient>(trackerClient);
+                },
                 runApplicationAsync: async (app, cancellationToken) =>
                 {
                     await app.StartAsync(cancellationToken);
@@ -84,7 +93,7 @@ public sealed class HostLifecycleTests
                     await app.StopAsync(cancellationToken);
                 });
 
-            Assert.Equal(0, exitCode);
+            Assert.True(exitCode == 0, stderr.ToString());
             Assert.Equal(Path.GetFullPath(workflowPath), loadedWorkflowPath);
             Assert.Single(urls);
             Assert.StartsWith("http://127.0.0.1:", urls[0], StringComparison.OrdinalIgnoreCase);
@@ -118,7 +127,11 @@ public sealed class HostLifecycleTests
                 ["--environment", "Development", workflowPath],
                 stderr,
                 configureBuilder: builder => AddTestConfiguration(builder, dbPath),
-                configureServices: services => services.AddSingleton<IGitHubTrackerClient>(trackerClient),
+                configureServices: services =>
+                {
+                    services.AddSingleton<ITrackerClient>(trackerClient);
+                    services.AddSingleton<IGitHubTrackerClient>(trackerClient);
+                },
                 runApplicationAsync: async (app, cancellationToken) =>
                 {
                     await app.StartAsync(cancellationToken);
@@ -126,7 +139,7 @@ public sealed class HostLifecycleTests
                     await app.StopAsync(cancellationToken);
                 });
 
-            Assert.Equal(0, exitCode);
+            Assert.True(exitCode == 0, stderr.ToString());
             Assert.Equal(Path.GetFullPath(workflowPath), loadedWorkflowPath);
             Assert.Equal(string.Empty, stderr.ToString());
         }
@@ -265,6 +278,15 @@ public sealed class HostLifecycleTests
             CancellationToken cancellationToken = default)
         {
             return Task.FromResult<IReadOnlyList<IssueStateSnapshot>>([]);
+        }
+
+        public Task<GitHubGraphQlExecutionResult> ExecuteGitHubGraphQlAsync(
+            TrackerQuery query,
+            string graphQlDocument,
+            string? variablesJson,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new GitHubGraphQlExecutionResult(true, "{\"data\":{}}"));
         }
     }
 

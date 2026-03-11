@@ -471,6 +471,100 @@ public sealed class GitHubTrackerClientTests
         Assert.Equal("github_unknown_payload", ex.Code);
     }
 
+    [Fact]
+    public async Task ExecuteGitHubGraphQlAsync_ShouldReturnSuccessForSingleOperation()
+    {
+        const string payload = """
+            {
+              "data": {
+                "viewer": {
+                  "login": "nick"
+                }
+              }
+            }
+            """;
+
+        using var httpClient = new HttpClient(new StaticJsonHandler(payload))
+        {
+            BaseAddress = new Uri("https://api.github.com/graphql")
+        };
+
+        var client = new GitHubTrackerClient(httpClient);
+        var result = await client.ExecuteGitHubGraphQlAsync(
+            new TrackerQuery(
+                Endpoint: "https://api.github.com/graphql",
+                ApiKey: "token",
+                Owner: "released",
+                Repo: "symphony",
+                ActiveStates: ["Open"],
+                Labels: [],
+                Milestone: null),
+            "query { viewer { login } }",
+            null);
+
+        Assert.True(result.Success);
+        Assert.Contains("\"viewer\"", result.PayloadJson, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExecuteGitHubGraphQlAsync_ShouldPreserveGraphQlErrorBody()
+    {
+        const string payload = """
+            {
+              "errors": [
+                { "message": "boom" }
+              ]
+            }
+            """;
+
+        using var httpClient = new HttpClient(new StaticJsonHandler(payload))
+        {
+            BaseAddress = new Uri("https://api.github.com/graphql")
+        };
+
+        var client = new GitHubTrackerClient(httpClient);
+        var result = await client.ExecuteGitHubGraphQlAsync(
+            new TrackerQuery(
+                Endpoint: "https://api.github.com/graphql",
+                ApiKey: "token",
+                Owner: "released",
+                Repo: "symphony",
+                ActiveStates: ["Open"],
+                Labels: [],
+                Milestone: null),
+            "query { viewer { login } }",
+            null);
+
+        Assert.False(result.Success);
+        Assert.Equal("github_graphql_errors", result.ErrorCode);
+        Assert.Contains("\"errors\"", result.PayloadJson, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExecuteGitHubGraphQlAsync_ShouldRejectMultipleOperations()
+    {
+        using var httpClient = new HttpClient(new StaticJsonHandler("{\"data\":{}}"))
+        {
+            BaseAddress = new Uri("https://api.github.com/graphql")
+        };
+
+        var client = new GitHubTrackerClient(httpClient);
+        var result = await client.ExecuteGitHubGraphQlAsync(
+            new TrackerQuery(
+                Endpoint: "https://api.github.com/graphql",
+                ApiKey: "token",
+                Owner: "released",
+                Repo: "symphony",
+                ActiveStates: ["Open"],
+                Labels: [],
+                Milestone: null),
+            "query One { viewer { login } } mutation Two { closeIssue(input: {}) { clientMutationId } }",
+            null);
+
+        Assert.False(result.Success);
+        Assert.Equal("invalid_graphql_document", result.ErrorCode);
+    }
+
     private sealed class StaticJsonHandler(string json) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

@@ -429,6 +429,15 @@ public sealed class OrchestrationTickServiceTests
                 .ToList();
             return Task.FromResult<IReadOnlyList<IssueStateSnapshot>>(snapshots);
         }
+
+        public Task<GitHubGraphQlExecutionResult> ExecuteGitHubGraphQlAsync(
+            TrackerQuery query,
+            string graphQlDocument,
+            string? variablesJson,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new GitHubGraphQlExecutionResult(true, "{\"data\":{}}"));
+        }
     }
 
     private sealed class FakeWorkspaceManager : IWorkspaceManager

@@ -137,7 +137,7 @@ public sealed class SymphonyDbContext(DbContextOptions<SymphonyDbContext> option
             entity.Property(x => x.CreatedAtUtc).IsRequired();
             entity.Property(x => x.UpdatedAtUtc).IsRequired();
             entity.HasIndex(x => x.RunId);
-            entity.HasIndex(x => x.RunAttemptId).IsUnique();
+            entity.HasIndex(x => x.RunAttemptId);
             entity.HasIndex(x => x.LastCodexTimestamp);
         });
 

@@ -122,6 +122,56 @@ public sealed class WorkspaceManagerTests
         }
     }
 
+    [Fact]
+    public async Task PrepareIssueWorkspaceAsync_ShouldFailWhenWorktreePathCollidesWithFile()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"symphony-ws-{Guid.NewGuid():N}");
+        var remoteBare = Path.Combine(tempRoot, "remote.git");
+        var seedClone = Path.Combine(tempRoot, "seed");
+        var workspaceRoot = Path.Combine(tempRoot, "workspaces");
+        var sharedClonePath = Path.Combine(workspaceRoot, "repo");
+        var worktreesRoot = Path.Combine(workspaceRoot, "worktrees");
+        var collidingPath = Path.Combine(worktreesRoot, "issue_101");
+
+        try
+        {
+            Directory.CreateDirectory(tempRoot);
+            Directory.CreateDirectory(worktreesRoot);
+            await File.WriteAllTextAsync(collidingPath, "collision");
+
+            await RunGitAsync(tempRoot, ["init", "--bare", remoteBare]);
+            await RunGitAsync(tempRoot, ["clone", remoteBare, seedClone]);
+            await RunGitAsync(seedClone, ["config", "user.name", "symphony-tests"]);
+            await RunGitAsync(seedClone, ["config", "user.email", "symphony-tests@example.com"]);
+            await File.WriteAllTextAsync(Path.Combine(seedClone, "README.md"), "seed");
+            await RunGitAsync(seedClone, ["add", "README.md"]);
+            await RunGitAsync(seedClone, ["commit", "-m", "seed"]);
+            await RunGitAsync(seedClone, ["branch", "-M", "main"]);
+            await RunGitAsync(seedClone, ["push", "-u", "origin", "main"]);
+
+            var manager = new GitWorktreeWorkspaceManager(
+                new NoOpWorkspaceHookRunner(),
+                NullLogger<GitWorktreeWorkspaceManager>.Instance);
+
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                manager.PrepareIssueWorkspaceAsync(new WorkspacePreparationRequest(
+                    IssueId: "I1",
+                    IssueIdentifier: "issue 101",
+                    SuggestedBranchName: null,
+                    WorkspaceRoot: workspaceRoot,
+                    SharedClonePath: sharedClonePath,
+                    WorktreesRoot: worktreesRoot,
+                    BaseBranch: "main",
+                    RemoteRepositoryUrl: remoteBare)));
+
+            Assert.Contains("already exists as a file", ex.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            TryDeleteDirectory(tempRoot);
+        }
+    }
+
     private static async Task<GitCommandResult> RunGitAsync(string workingDirectory, IReadOnlyList<string> args)
     {
         var info = new ProcessStartInfo

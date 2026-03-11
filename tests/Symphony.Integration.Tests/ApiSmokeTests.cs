@@ -1,6 +1,15 @@
-using Microsoft.AspNetCore.Mvc.Testing;
+using System.Net;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Symphony.Core.Abstractions;
+using Symphony.Core.Models;
 using Symphony.Host;
+using Symphony.Infrastructure.Persistence.Sqlite;
+using Symphony.Infrastructure.Persistence.Sqlite.Entities;
+using Symphony.Infrastructure.Tracker.GitHub;
 
 namespace Symphony.Integration.Tests;
 
@@ -10,19 +19,34 @@ public sealed class ApiSmokeTests
     public async Task HealthEndpoint_ShouldReturnSuccess()
     {
         var workflowPath = CreateValidWorkflowPath();
+        var dbPath = Path.Combine(Path.GetTempPath(), $"symphony-int-{Guid.NewGuid():N}.db");
+        var stderr = new StringWriter();
+        HttpStatusCode? statusCode = null;
 
         try
         {
-            await using var factory = CreateFactory(workflowPath);
-            using var client = factory.CreateClient();
+            var exitCode = await SymphonyHostApplication.RunCliAsync(
+                [workflowPath],
+                stderr,
+                configureBuilder: builder => ConfigureTestServer(builder, dbPath),
+                configureServices: services => RegisterFakeTracker(services),
+                runApplicationAsync: async (app, cancellationToken) =>
+                {
+                    await app.StartAsync(cancellationToken);
+                    using var client = app.GetTestClient();
+                    var response = await client.GetAsync("/api/v1/health", cancellationToken);
+                    statusCode = response.StatusCode;
+                    await app.StopAsync(cancellationToken);
+                });
 
-            var response = await client.GetAsync("/api/v1/health");
-
-            Assert.True(response.IsSuccessStatusCode);
+            Assert.True(exitCode == 0, stderr.ToString());
+            Assert.Equal(HttpStatusCode.OK, statusCode);
         }
         finally
         {
-            File.Delete(workflowPath);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            TryDeleteFile(dbPath);
+            TryDeleteFile(workflowPath);
         }
     }
 
@@ -30,23 +54,155 @@ public sealed class ApiSmokeTests
     public async Task RuntimeEndpoint_ShouldReturnConfiguredDefaults()
     {
         var workflowPath = CreateValidWorkflowPath();
+        var dbPath = Path.Combine(Path.GetTempPath(), $"symphony-int-{Guid.NewGuid():N}.db");
+        var stderr = new StringWriter();
+        HttpStatusCode? statusCode = null;
+        string? content = null;
 
         try
         {
-            await using var factory = CreateFactory(workflowPath);
-            using var client = factory.CreateClient();
+            var exitCode = await SymphonyHostApplication.RunCliAsync(
+                [workflowPath],
+                stderr,
+                configureBuilder: builder => ConfigureTestServer(builder, dbPath),
+                configureServices: services => RegisterFakeTracker(services),
+                runApplicationAsync: async (app, cancellationToken) =>
+                {
+                    await app.StartAsync(cancellationToken);
+                    using var client = app.GetTestClient();
+                    var response = await client.GetAsync("/api/v1/runtime", cancellationToken);
+                    statusCode = response.StatusCode;
+                    content = await response.Content.ReadAsStringAsync(cancellationToken);
+                    await app.StopAsync(cancellationToken);
+                });
 
-            var response = await client.GetAsync("/api/v1/runtime");
-            var content = await response.Content.ReadAsStringAsync();
-
-            Assert.True(response.IsSuccessStatusCode);
+            Assert.True(exitCode == 0, stderr.ToString());
+            Assert.Equal(HttpStatusCode.OK, statusCode);
+            Assert.NotNull(content);
             Assert.Contains("\"intervalMs\":600000", content, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("\"maxConcurrentAgents\":5", content, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("\"maxTurns\":20", content, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
-            File.Delete(workflowPath);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            TryDeleteFile(dbPath);
+            TryDeleteFile(workflowPath);
+        }
+    }
+
+    [Fact]
+    public async Task StateEndpoint_ShouldReturnSnapshotShape()
+    {
+        var workflowPath = CreateValidWorkflowPath();
+        var dbPath = Path.Combine(Path.GetTempPath(), $"symphony-int-{Guid.NewGuid():N}.db");
+        var stderr = new StringWriter();
+        string? content = null;
+
+        try
+        {
+            var exitCode = await SymphonyHostApplication.RunCliAsync(
+                [workflowPath],
+                stderr,
+                configureBuilder: builder => ConfigureTestServer(builder, dbPath),
+                configureServices: services => RegisterFakeTracker(services),
+                runApplicationAsync: async (app, cancellationToken) =>
+                {
+                    await app.StartAsync(cancellationToken);
+                    using var client = app.GetTestClient();
+                    content = await client.GetStringAsync("/api/v1/state", cancellationToken);
+                    await app.StopAsync(cancellationToken);
+                });
+
+            Assert.True(exitCode == 0, stderr.ToString());
+            Assert.NotNull(content);
+            Assert.Contains("\"counts\"", content, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("\"codex_totals\"", content, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            TryDeleteFile(dbPath);
+            TryDeleteFile(workflowPath);
+        }
+    }
+
+    [Fact]
+    public async Task RefreshEndpoint_ShouldQueueBestEffortPoll()
+    {
+        var workflowPath = CreateValidWorkflowPath();
+        var dbPath = Path.Combine(Path.GetTempPath(), $"symphony-int-{Guid.NewGuid():N}.db");
+        var stderr = new StringWriter();
+        HttpStatusCode? statusCode = null;
+        string? content = null;
+
+        try
+        {
+            var exitCode = await SymphonyHostApplication.RunCliAsync(
+                [workflowPath],
+                stderr,
+                configureBuilder: builder => ConfigureTestServer(builder, dbPath),
+                configureServices: services => RegisterFakeTracker(services),
+                runApplicationAsync: async (app, cancellationToken) =>
+                {
+                    await app.StartAsync(cancellationToken);
+                    using var client = app.GetTestClient();
+                    var response = await client.PostAsync("/api/v1/refresh", content: null, cancellationToken);
+                    statusCode = response.StatusCode;
+                    content = await response.Content.ReadAsStringAsync(cancellationToken);
+                    await app.StopAsync(cancellationToken);
+                });
+
+            Assert.True(exitCode == 0, stderr.ToString());
+            Assert.Equal(HttpStatusCode.Accepted, statusCode);
+            Assert.NotNull(content);
+            Assert.Contains("\"queued\":true", content, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("\"operations\"", content, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            TryDeleteFile(dbPath);
+            TryDeleteFile(workflowPath);
+        }
+    }
+
+    [Fact]
+    public async Task IssueEndpoint_ShouldReturnTrackedIssueDetails()
+    {
+        var workflowPath = CreateValidWorkflowPath();
+        var dbPath = Path.Combine(Path.GetTempPath(), $"symphony-int-{Guid.NewGuid():N}.db");
+        var stderr = new StringWriter();
+        string? content = null;
+
+        try
+        {
+            await SeedIssueStateAsync(dbPath, "MT-649");
+
+            var exitCode = await SymphonyHostApplication.RunCliAsync(
+                [workflowPath],
+                stderr,
+                configureBuilder: builder => ConfigureTestServer(builder, dbPath),
+                configureServices: services => RegisterFakeTracker(services),
+                runApplicationAsync: async (app, cancellationToken) =>
+                {
+                    await app.StartAsync(cancellationToken);
+                    using var client = app.GetTestClient();
+                    content = await client.GetStringAsync("/api/v1/MT-649", cancellationToken);
+                    await app.StopAsync(cancellationToken);
+                });
+
+            Assert.True(exitCode == 0, stderr.ToString());
+            Assert.NotNull(content);
+            Assert.Contains("\"issue_identifier\":\"MT-649\"", content, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("\"workspace\"", content, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("\"recent_events\"", content, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            TryDeleteFile(dbPath);
+            TryDeleteFile(workflowPath);
         }
     }
 
@@ -113,8 +269,8 @@ public sealed class ApiSmokeTests
         finally
         {
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-            File.Delete(dbPath);
-            File.Delete(workflowPath);
+            TryDeleteFile(dbPath);
+            TryDeleteFile(workflowPath);
         }
     }
 
@@ -159,23 +315,137 @@ public sealed class ApiSmokeTests
         return workflowPath;
     }
 
-    private static WebApplicationFactory<Program> CreateFactory(string workflowPath)
+    private static void ConfigureTestServer(WebApplicationBuilder builder, string dbPath)
     {
-        var dbPath = Path.Combine(Path.GetTempPath(), $"symphony-int-{Guid.NewGuid():N}.db");
-        var connectionString = $"Data Source={dbPath};Cache=Shared;Mode=ReadWriteCreate";
-
-        return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        builder.WebHost.UseTestServer();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
-            builder.ConfigureAppConfiguration((_, configBuilder) =>
-            {
-                configBuilder.AddInMemoryCollection(new Dictionary<string, string?>
-                {
-                    ["Workflow:Path"] = workflowPath,
-                    ["Symphony:Tracker:Owner"] = "integration-owner",
-                    ["Symphony:Tracker:Repo"] = "integration-repo",
-                    ["Persistence:ConnectionString"] = connectionString
-                });
-            });
+            ["Persistence:ConnectionString"] = $"Data Source={dbPath};Cache=Shared;Mode=ReadWriteCreate"
         });
+    }
+
+    private static void RegisterFakeTracker(IServiceCollection services)
+    {
+        var trackerClient = new FakeGitHubTrackerClient();
+        services.AddSingleton<ITrackerClient>(trackerClient);
+        services.AddSingleton<IGitHubTrackerClient>(trackerClient);
+    }
+
+    private static async Task SeedIssueStateAsync(string dbPath, string issueIdentifier)
+    {
+        var options = new DbContextOptionsBuilder<SymphonyDbContext>()
+            .UseSqlite($"Data Source={dbPath};Cache=Shared;Mode=ReadWriteCreate")
+            .Options;
+
+        await using var dbContext = new SymphonyDbContext(options);
+        await dbContext.Database.MigrateAsync();
+
+        dbContext.Runs.Add(new RunEntity
+        {
+            Id = "run-1",
+            IssueId = "issue-1",
+            IssueIdentifier = issueIdentifier,
+            OwnerInstanceId = "instance-1",
+            Status = RunStatusNames.Running,
+            State = "Open",
+            SessionId = "thread-1-turn-1",
+            LastEvent = "notification",
+            LastMessage = "Working on tests",
+            StartedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1),
+            LastEventAtUtc = DateTimeOffset.UtcNow,
+            TurnCount = 2,
+            InputTokens = 10,
+            OutputTokens = 5,
+            TotalTokens = 15
+        });
+        dbContext.RunAttempts.Add(new RunAttemptEntity
+        {
+            Id = "attempt-1",
+            RunId = "run-1",
+            IssueId = "issue-1",
+            Status = RunStatusNames.Running,
+            StartedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1)
+        });
+        dbContext.WorkspaceRecords.Add(new WorkspaceRecordEntity
+        {
+            IssueId = "issue-1",
+            IssueIdentifier = issueIdentifier,
+            WorkspacePath = @"C:\tmp\MT-649",
+            BranchName = "feature/mt-649",
+            LastPreparedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2)
+        });
+        dbContext.EventLog.Add(new EventLogEntity
+        {
+            IssueId = "issue-1",
+            IssueIdentifier = issueIdentifier,
+            RunId = "run-1",
+            RunAttemptId = "attempt-1",
+            SessionId = "thread-1-turn-1",
+            EventName = "notification",
+            Level = "Information",
+            Message = "Working on tests",
+            OccurredAtUtc = DateTimeOffset.UtcNow
+        });
+
+        await dbContext.SaveChangesAsync();
+    }
+
+    private sealed class FakeGitHubTrackerClient : IGitHubTrackerClient
+    {
+        public Task<IReadOnlyList<NormalizedIssue>> FetchCandidateIssuesAsync(
+            TrackerQuery query,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<NormalizedIssue>>([]);
+        }
+
+        public Task<IReadOnlyList<NormalizedIssue>> FetchIssuesByStatesAsync(
+            TrackerQuery query,
+            IReadOnlyList<string> states,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<NormalizedIssue>>([]);
+        }
+
+        public Task<IReadOnlyList<IssueStateSnapshot>> FetchIssueStatesByIdsAsync(
+            TrackerQuery query,
+            IReadOnlyList<string> issueIds,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<IssueStateSnapshot>>([]);
+        }
+
+        public Task<GitHubGraphQlExecutionResult> ExecuteGitHubGraphQlAsync(
+            TrackerQuery query,
+            string graphQlDocument,
+            string? variablesJson,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new GitHubGraphQlExecutionResult(true, "{\"data\":{}}"));
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+
+                return;
+            }
+            catch (IOException) when (attempt < 4)
+            {
+                Thread.Sleep(100);
+            }
+            catch (UnauthorizedAccessException) when (attempt < 4)
+            {
+                Thread.Sleep(100);
+            }
+        }
     }
 }

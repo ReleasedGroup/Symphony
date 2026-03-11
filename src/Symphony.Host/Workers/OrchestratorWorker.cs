@@ -7,6 +7,7 @@ namespace Symphony.Host.Workers;
 public sealed class OrchestratorWorker(
     ILogger<OrchestratorWorker> logger,
     IServiceScopeFactory serviceScopeFactory,
+    RefreshSignalService refreshSignalService,
     IOptionsMonitor<SymphonyRuntimeOptions> runtimeOptions) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -54,7 +55,7 @@ public sealed class OrchestratorWorker(
             var pollInterval = TimeSpan.FromMilliseconds(pollIntervalMs);
             try
             {
-                await Task.Delay(pollInterval, stoppingToken);
+                await refreshSignalService.WaitAsync(pollInterval, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

@@ -1,20 +1,5 @@
-using Symphony.Core.Models;
+using Symphony.Core.Abstractions;
 
 namespace Symphony.Infrastructure.Tracker.GitHub;
 
-public interface IGitHubTrackerClient
-{
-    Task<IReadOnlyList<NormalizedIssue>> FetchCandidateIssuesAsync(
-        TrackerQuery query,
-        CancellationToken cancellationToken = default);
-
-    Task<IReadOnlyList<NormalizedIssue>> FetchIssuesByStatesAsync(
-        TrackerQuery query,
-        IReadOnlyList<string> states,
-        CancellationToken cancellationToken = default);
-
-    Task<IReadOnlyList<IssueStateSnapshot>> FetchIssueStatesByIdsAsync(
-        TrackerQuery query,
-        IReadOnlyList<string> issueIds,
-        CancellationToken cancellationToken = default);
-}
+public interface IGitHubTrackerClient : ITrackerClient;
