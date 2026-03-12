@@ -6,6 +6,8 @@ internal sealed record SymphonyInstallationRuntime(
     string WindowsSetupScriptFileName,
     string UnixSetupScriptFileName)
 {
+    public Func<CancellationToken, Task<CodexCliPreflightResult>> CodexCliPreflightAsync { get; init; } = CodexCliPreflightEvaluator.CheckAsync;
+
     public static SymphonyInstallationRuntime CreateDefault()
     {
         return new SymphonyInstallationRuntime(

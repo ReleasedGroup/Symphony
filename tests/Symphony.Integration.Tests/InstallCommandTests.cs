@@ -40,7 +40,7 @@ public sealed class InstallCommandTests
                 output,
                 error,
                 CancellationToken.None,
-                new SymphonyInstallationRuntime(bundleRoot, executableName, "setup-symphony.cmd", "setup-symphony.sh"));
+                CreateRuntime(bundleRoot, executableName, readyToStart: true));
 
             Assert.Equal(0, exitCode);
             Assert.Equal(string.Empty, error.ToString());
@@ -97,7 +97,7 @@ public sealed class InstallCommandTests
                     TextWriter.Null,
                     TextWriter.Null,
                     CancellationToken.None,
-                    new SymphonyInstallationRuntime(bundleRoot, executableName, "setup-symphony.cmd", "setup-symphony.sh")));
+                    CreateRuntime(bundleRoot, executableName, readyToStart: true)));
 
             Assert.Contains("GitHub token input ended unexpectedly.", ex.Message, StringComparison.Ordinal);
         }
@@ -127,7 +127,7 @@ public sealed class InstallCommandTests
                     TextWriter.Null,
                     TextWriter.Null,
                     CancellationToken.None,
-                    new SymphonyInstallationRuntime(bundleRoot, executableName, "setup-symphony.cmd", "setup-symphony.sh")));
+                    CreateRuntime(bundleRoot, executableName, readyToStart: true)));
 
             Assert.Contains("GitHub owner input ended unexpectedly.", ex.Message, StringComparison.Ordinal);
         }
@@ -149,11 +149,141 @@ public sealed class InstallCommandTests
         Assert.True(parsed.ShowHelp);
     }
 
+    [Fact]
+    public async Task RunAsync_ShouldBlockLaunchWhenCodexCliIsNotReady()
+    {
+        var bundleRoot = CreateTempDirectory("bundle");
+        var installRoot = CreateTempDirectory("install");
+        var executableName = OperatingSystem.IsWindows() ? "Symphony.exe" : "Symphony";
+
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(bundleRoot, executableName), "binary");
+            await File.WriteAllTextAsync(Path.Combine(bundleRoot, "setup-symphony.cmd"), "@echo off");
+            await File.WriteAllTextAsync(Path.Combine(bundleRoot, "setup-symphony.sh"), "#!/usr/bin/env bash");
+
+            var input = new StringReader($"""
+                github_pat_testtoken
+                releasedgroup
+                symphony
+                main
+                {installRoot}
+                43123
+                n
+                """);
+            var output = new StringWriter();
+
+            var exitCode = await SymphonyInstallCommand.RunAsync(
+                new InstallCommandOptions(NoLaunch: false, ShowHelp: false),
+                input,
+                output,
+                TextWriter.Null,
+                CancellationToken.None,
+                CreateRuntime(bundleRoot, executableName, readyToStart: false));
+
+            Assert.Equal(0, exitCode);
+            Assert.Contains("Codex CLI check:", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Fix the Codex CLI items above before Symphony starts.", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Codex is not ready; installation has completed, but Symphony will not be started automatically.", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(bundleRoot);
+            TryDeleteDirectory(installRoot);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ShouldReportCodexCliIssuesForNoLaunchInstalls()
+    {
+        var bundleRoot = CreateTempDirectory("bundle");
+        var installRoot = CreateTempDirectory("install");
+        var executableName = OperatingSystem.IsWindows() ? "Symphony.exe" : "Symphony";
+
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(bundleRoot, executableName), "binary");
+            await File.WriteAllTextAsync(Path.Combine(bundleRoot, "setup-symphony.cmd"), "@echo off");
+            await File.WriteAllTextAsync(Path.Combine(bundleRoot, "setup-symphony.sh"), "#!/usr/bin/env bash");
+
+            var input = new StringReader($"""
+                github_pat_testtoken
+                releasedgroup
+                symphony
+                main
+                {installRoot}
+                43123
+                """);
+            var output = new StringWriter();
+
+            var exitCode = await SymphonyInstallCommand.RunAsync(
+                new InstallCommandOptions(NoLaunch: true, ShowHelp: false),
+                input,
+                output,
+                TextWriter.Null,
+                CancellationToken.None,
+                CreateRuntime(bundleRoot, executableName, readyToStart: false));
+
+            Assert.Equal(0, exitCode);
+            Assert.Contains("Before your first run, fix the Codex CLI items above", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(bundleRoot);
+            TryDeleteDirectory(installRoot);
+        }
+    }
+
     private static string CreateTempDirectory(string prefix)
     {
         var path = Path.Combine(Path.GetTempPath(), $"symphony-{prefix}-{Guid.NewGuid():N}");
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static SymphonyInstallationRuntime CreateRuntime(string bundleRoot, string executableName, bool readyToStart)
+    {
+        return new SymphonyInstallationRuntime(bundleRoot, executableName, "setup-symphony.cmd", "setup-symphony.sh")
+        {
+            CodexCliPreflightAsync = _ => Task.FromResult(CreatePreflightResult(readyToStart))
+        };
+    }
+
+    private static CodexCliPreflightResult CreatePreflightResult(bool readyToStart)
+    {
+        return readyToStart
+            ? new CodexCliPreflightResult(
+                InstalledVersion: "0.114.0",
+                ValidatedVersion: "0.114.0",
+                LatestVersion: "0.114.0",
+                LatestVersionSource: "npm",
+                LatestVersionVerified: true,
+                AuthJsonPath: Path.Combine(Path.GetTempPath(), ".codex", "auth.json"),
+                HasAuthJson: true,
+                LoginConfigured: true,
+                BlockingIssues: [],
+                Warnings: [],
+                RemediationSteps: [])
+            : new CodexCliPreflightResult(
+                InstalledVersion: "0.113.0",
+                ValidatedVersion: "0.114.0",
+                LatestVersion: "0.114.0",
+                LatestVersionSource: "npm",
+                LatestVersionVerified: true,
+                AuthJsonPath: Path.Combine(Path.GetTempPath(), ".codex", "auth.json"),
+                HasAuthJson: false,
+                LoginConfigured: false,
+                BlockingIssues:
+                [
+                    "Codex CLI 0.113.0 is older than the Symphony-validated version 0.114.0.",
+                    $"Codex auth file is missing: '{Path.Combine(Path.GetTempPath(), ".codex", "auth.json")}'."
+                ],
+                Warnings: [],
+                RemediationSteps:
+                [
+                    "Update Codex CLI with `npm install -g @openai/codex@0.114.0`.",
+                    "Run `codex login` in another terminal, finish the sign-in flow, then return here."
+                ]);
     }
 
     private static void TryDeleteDirectory(string path)
