@@ -1,0 +1,18 @@
+<Project>
+  <PropertyGroup>
+    <Company>ReleasedGroup</Company>
+    <Authors>ReleasedGroup</Authors>
+    <Product>Symphony</Product>
+    <RepositoryUrl>https://github.com/ReleasedGroup/Symphony</RepositoryUrl>
+    <SymphonyVersionPrefix Condition="'$(SymphonyVersionPrefix)' == ''">0.1.0</SymphonyVersionPrefix>
+    <SymphonyVersionSuffix Condition="'$(SymphonyVersionSuffix)' == ''">dev</SymphonyVersionSuffix>
+    <VersionPrefix Condition="'$(VersionPrefix)' == ''">$(SymphonyVersionPrefix)</VersionPrefix>
+    <VersionSuffix Condition="'$(VersionSuffix)' == '' and '$(SymphonyVersionSuffix)' != ''">$(SymphonyVersionSuffix)</VersionSuffix>
+    <Version Condition="'$(Version)' == '' and '$(VersionSuffix)' != ''">$(VersionPrefix)-$(VersionSuffix)</Version>
+    <Version Condition="'$(Version)' == '' and '$(VersionSuffix)' == ''">$(VersionPrefix)</Version>
+    <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">$(VersionPrefix).0</AssemblyVersion>
+    <FileVersion Condition="'$(FileVersion)' == ''">$(VersionPrefix).0</FileVersion>
+    <InformationalVersion Condition="'$(InformationalVersion)' == ''">$(Version)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+</Project>

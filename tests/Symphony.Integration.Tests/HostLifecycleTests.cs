@@ -235,6 +235,22 @@ public sealed class HostLifecycleTests
         }
     }
 
+    [Fact]
+    public async Task RunCliAsync_ShouldWriteVersionWithoutStartingHost()
+    {
+        var stderr = new StringWriter();
+        var stdout = new StringWriter();
+
+        var exitCode = await SymphonyHostApplication.RunCliAsync(
+            ["version"],
+            stderr,
+            standardOutput: stdout);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Symphony", stdout.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(string.Empty, stderr.ToString());
+    }
+
     private static void AddTestConfiguration(WebApplicationBuilder builder, string dbPath)
     {
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>

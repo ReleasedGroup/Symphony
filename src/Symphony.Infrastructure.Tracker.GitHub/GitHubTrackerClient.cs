@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Symphony.Core.Abstractions;
+using Symphony.Core.Metadata;
 using Symphony.Core.Models;
 
 namespace Symphony.Infrastructure.Tracker.GitHub;
@@ -605,7 +606,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : ITracke
     {
         var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-        request.Headers.UserAgent.Add(new ProductInfoHeaderValue("Symphony", "1.0"));
+        request.Headers.UserAgent.Add(new ProductInfoHeaderValue(SymphonyProductInfo.Name, SymphonyProductInfo.UserAgentVersion));
         request.Content = JsonContent.Create(new
         {
             query = graphQlQuery,

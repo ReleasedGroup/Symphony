@@ -61,6 +61,8 @@ If you need the raw probe, the health endpoint remains available at:
 http://127.0.0.1:<port>/api/v1/health
 ```
 
+If you are starting from a GitHub Release bundle instead of source, use [PackageGuide.md](PackageGuide.md) for the interactive installer flow.
+
 ## Workflow Settings
 
 Symphony reads its runtime behavior from [`WORKFLOW.md`](../WORKFLOW.md).

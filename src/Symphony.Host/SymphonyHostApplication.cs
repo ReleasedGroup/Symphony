@@ -6,7 +6,9 @@ using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Symphony.Core.Configuration;
+using Symphony.Core.Metadata;
 using Symphony.Host.Services;
+using Symphony.Host.Setup;
 using Symphony.Host.Workers;
 using Symphony.Infrastructure.Agent.Codex;
 using Symphony.Infrastructure.Persistence.Sqlite;
@@ -23,14 +25,35 @@ internal static class SymphonyHostApplication
     internal static async Task<int> RunCliAsync(
         string[] args,
         TextWriter standardError,
+        TextReader? standardInput = null,
+        TextWriter? standardOutput = null,
         Action<WebApplicationBuilder>? configureBuilder = null,
         Action<IServiceCollection>? configureServices = null,
         Func<WebApplication, CancellationToken, Task>? runApplicationAsync = null,
         CancellationToken cancellationToken = default)
     {
+        standardInput ??= Console.In;
+        standardOutput ??= Console.Out;
+
         try
         {
             var commandLine = HostCommandLineOptions.Parse(args);
+            if (commandLine.Mode is HostCommandMode.Version)
+            {
+                await standardOutput.WriteLineAsync($"{SymphonyProductInfo.Name} {SymphonyProductInfo.DisplayVersion}");
+                return 0;
+            }
+
+            if (commandLine.Mode is HostCommandMode.Install)
+            {
+                return await SymphonyInstallCommand.RunAsync(
+                    commandLine.InstallOptions!,
+                    standardInput,
+                    standardOutput,
+                    standardError,
+                    cancellationToken);
+            }
+
             var builder = CreateBuilder(commandLine, configureBuilder);
             ConfigureServices(builder.Services, builder.Configuration);
             configureServices?.Invoke(builder.Services);
@@ -67,7 +90,7 @@ internal static class SymphonyHostApplication
 
         builder.Host.UseWindowsService(options =>
         {
-            options.ServiceName = "Symphony";
+            options.ServiceName = SymphonyProductInfo.Name;
         });
 
         configureBuilder?.Invoke(builder);
@@ -287,6 +310,11 @@ internal static class SymphonyHostApplication
 
             return Results.Ok(new
             {
+                application = new
+                {
+                    name = SymphonyProductInfo.Name,
+                    version = SymphonyProductInfo.DisplayVersion
+                },
                 runtimeDefaults = new
                 {
                     polling = new { options.Polling.IntervalMs },
@@ -375,20 +403,54 @@ internal static class SymphonyHostApplication
     {
         return ex switch
         {
-            HostCommandLineException => $"Startup failed: {ex.Message}",
+            SymphonyCliException => $"Startup failed: {ex.Message}",
             WorkflowLoadException workflowEx => $"Startup failed ({workflowEx.Code}): {workflowEx.Message}",
             OptionsValidationException => $"Startup failed: {ex.Message}",
             _ => $"Startup failed: {ex.Message}"
         };
     }
 
+    private enum HostCommandMode
+    {
+        Run,
+        Install,
+        Version
+    }
+
     private sealed record HostCommandLineOptions(
+        HostCommandMode Mode,
         string[] RemainingArgs,
         string? WorkflowPath,
-        int? Port)
+        int? Port,
+        InstallCommandOptions? InstallOptions)
     {
         public static HostCommandLineOptions Parse(IReadOnlyList<string> args)
         {
+            if (args.Count > 0)
+            {
+                var first = args[0];
+                if (first.Equals("install", StringComparison.OrdinalIgnoreCase))
+                {
+                    return new HostCommandLineOptions(
+                        HostCommandMode.Install,
+                        [],
+                        WorkflowPath: null,
+                        Port: null,
+                        InstallCommandOptions.Parse(args.Skip(1).ToArray()));
+                }
+
+                if (first.Equals("--version", StringComparison.OrdinalIgnoreCase) ||
+                    first.Equals("version", StringComparison.OrdinalIgnoreCase))
+                {
+                    return new HostCommandLineOptions(
+                        HostCommandMode.Version,
+                        [],
+                        WorkflowPath: null,
+                        Port: null,
+                        InstallOptions: null);
+                }
+            }
+
             var remainingArgs = new List<string>(args.Count);
             string? workflowPath = null;
             int? port = null;
@@ -400,7 +462,7 @@ internal static class SymphonyHostApplication
                 {
                     if (index + 1 >= args.Count)
                     {
-                        throw new HostCommandLineException("The --port option requires an integer value.");
+                        throw new SymphonyCliException("The --port option requires an integer value.");
                     }
 
                     port = ParsePort(args[++index]);
@@ -436,22 +498,20 @@ internal static class SymphonyHostApplication
                     continue;
                 }
 
-                throw new HostCommandLineException("Only one positional workflow path may be provided.");
+                throw new SymphonyCliException("Only one positional workflow path may be provided.");
             }
 
-            return new HostCommandLineOptions(remainingArgs.ToArray(), workflowPath, port);
+            return new HostCommandLineOptions(HostCommandMode.Run, remainingArgs.ToArray(), workflowPath, port, InstallOptions: null);
         }
 
         private static int ParsePort(string value)
         {
             if (!int.TryParse(value, out var port) || port < 0)
             {
-                throw new HostCommandLineException($"The --port option must be an integer greater than or equal to 0. Received '{value}'.");
+                throw new SymphonyCliException($"The --port option must be an integer greater than or equal to 0. Received '{value}'.");
             }
 
             return port;
         }
     }
-
-    private sealed class HostCommandLineException(string message) : Exception(message);
 }
