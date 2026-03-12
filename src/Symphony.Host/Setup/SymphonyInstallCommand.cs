@@ -56,9 +56,9 @@ internal static class SymphonyInstallCommand
         await output.WriteLineAsync("Press Enter to accept a default value when one is shown in brackets.");
         await output.WriteLineAsync(string.Empty);
 
+        var token = await PromptRequiredSecretAsync(input, output, cancellationToken);
         var owner = await PromptRequiredAsync(input, output, "GitHub owner", defaultValue: null, cancellationToken);
         var repo = await PromptRequiredAsync(input, output, "GitHub repository", defaultValue: null, cancellationToken);
-        var token = await PromptRequiredSecretAsync(input, output, cancellationToken);
         var baseBranch = await PromptRequiredAsync(input, output, "Base branch", "main", cancellationToken);
 
         var defaultInstallFolder = bundleRoot;
@@ -100,11 +100,13 @@ internal static class SymphonyInstallCommand
         Directory.CreateDirectory(installFolder);
         await CopyBundleAsync(bundleRoot, installFolder, cancellationToken);
 
+        var environmentFilePath = Path.Combine(installFolder, EnvironmentFileName);
         await File.WriteAllTextAsync(
-            Path.Combine(installFolder, EnvironmentFileName),
+            environmentFilePath,
             RenderEnvironmentFile(token),
             Utf8WithoutBom,
             cancellationToken);
+        EnsureUnixSecretMode(environmentFilePath);
 
         await File.WriteAllTextAsync(
             Path.Combine(installFolder, "appsettings.json"),
@@ -246,6 +248,10 @@ internal static class SymphonyInstallCommand
             else
             {
                 token = await input.ReadLineAsync(cancellationToken);
+                if (token is null)
+                {
+                    throw new SymphonyCliException("GitHub token input ended unexpectedly.");
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(token))
@@ -278,6 +284,11 @@ internal static class SymphonyInstallCommand
             }
 
             var response = await input.ReadLineAsync(cancellationToken);
+            if (response is null)
+            {
+                throw new SymphonyCliException($"{label} input ended unexpectedly.");
+            }
+
             if (!string.IsNullOrWhiteSpace(response))
             {
                 return response.Trim();
@@ -308,6 +319,11 @@ internal static class SymphonyInstallCommand
             await output.WriteAsync(suffix);
 
             var response = await input.ReadLineAsync(cancellationToken);
+            if (response is null)
+            {
+                throw new SymphonyCliException($"{label} input ended unexpectedly.");
+            }
+
             if (string.IsNullOrWhiteSpace(response))
             {
                 return defaultValue;
@@ -358,6 +374,25 @@ internal static class SymphonyInstallCommand
         }
 
         return builder.ToString().Trim();
+    }
+
+    private static void EnsureUnixSecretMode(string path)
+    {
+        if (OperatingSystem.IsWindows() || !File.Exists(path))
+        {
+            return;
+        }
+
+        try
+        {
+            File.SetUnixFileMode(
+                path,
+                UnixFileMode.UserRead |
+                UnixFileMode.UserWrite);
+        }
+        catch (PlatformNotSupportedException)
+        {
+        }
     }
 
     private static void EnsureUnixModes(params string[] paths)

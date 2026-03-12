@@ -1,3 +1,4 @@
+using Symphony.Host;
 using Symphony.Host.Setup;
 
 namespace Symphony.Integration.Tests;
@@ -23,9 +24,9 @@ public sealed class InstallCommandTests
             await File.WriteAllTextAsync(Path.Combine(bundleRoot, ".env"), "GITHUB_TOKEN=stale");
 
             var input = new StringReader($"""
+                github_pat_testtoken
                 releasedgroup
                 symphony
-                github_pat_testtoken
                 main
                 {installRoot}
                 43123
@@ -56,6 +57,12 @@ public sealed class InstallCommandTests
 
             var environmentFile = await File.ReadAllTextAsync(Path.Combine(installRoot, ".env"));
             Assert.Equal($"GITHUB_TOKEN=github_pat_testtoken{Environment.NewLine}", environmentFile);
+            if (!OperatingSystem.IsWindows())
+            {
+                Assert.Equal(
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite,
+                    File.GetUnixFileMode(Path.Combine(installRoot, ".env")));
+            }
 
             Assert.True(File.Exists(Path.Combine(installRoot, executableName)));
             Assert.True(File.Exists(Path.Combine(installRoot, "wwwroot", "index.html")));
@@ -68,6 +75,78 @@ public sealed class InstallCommandTests
             TryDeleteDirectory(bundleRoot);
             TryDeleteDirectory(installRoot);
         }
+    }
+
+    [Fact]
+    public async Task RunAsync_ShouldFailFastWhenTokenInputEndsUnexpectedly()
+    {
+        var bundleRoot = CreateTempDirectory("bundle");
+        var executableName = OperatingSystem.IsWindows() ? "Symphony.exe" : "Symphony";
+
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(bundleRoot, executableName), "binary");
+            await File.WriteAllTextAsync(Path.Combine(bundleRoot, "setup-symphony.cmd"), "@echo off");
+            await File.WriteAllTextAsync(Path.Combine(bundleRoot, "setup-symphony.sh"), "#!/usr/bin/env bash");
+
+            var input = new StringReader(string.Empty);
+            var ex = await Assert.ThrowsAsync<SymphonyCliException>(() =>
+                SymphonyInstallCommand.RunAsync(
+                    new InstallCommandOptions(NoLaunch: true, ShowHelp: false),
+                    input,
+                    TextWriter.Null,
+                    TextWriter.Null,
+                    CancellationToken.None,
+                    new SymphonyInstallationRuntime(bundleRoot, executableName, "setup-symphony.cmd", "setup-symphony.sh")));
+
+            Assert.Contains("GitHub token input ended unexpectedly.", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(bundleRoot);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ShouldFailFastWhenRequiredTextInputEndsUnexpectedly()
+    {
+        var bundleRoot = CreateTempDirectory("bundle");
+        var executableName = OperatingSystem.IsWindows() ? "Symphony.exe" : "Symphony";
+
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(bundleRoot, executableName), "binary");
+            await File.WriteAllTextAsync(Path.Combine(bundleRoot, "setup-symphony.cmd"), "@echo off");
+            await File.WriteAllTextAsync(Path.Combine(bundleRoot, "setup-symphony.sh"), "#!/usr/bin/env bash");
+
+            var input = new StringReader("github_pat_testtoken");
+            var ex = await Assert.ThrowsAsync<SymphonyCliException>(() =>
+                SymphonyInstallCommand.RunAsync(
+                    new InstallCommandOptions(NoLaunch: true, ShowHelp: false),
+                    input,
+                    TextWriter.Null,
+                    TextWriter.Null,
+                    CancellationToken.None,
+                    new SymphonyInstallationRuntime(bundleRoot, executableName, "setup-symphony.cmd", "setup-symphony.sh")));
+
+            Assert.Contains("GitHub owner input ended unexpectedly.", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(bundleRoot);
+        }
+    }
+
+    [Theory]
+    [InlineData("--help")]
+    [InlineData("--HELP")]
+    [InlineData("-h")]
+    [InlineData("-H")]
+    public void InstallCommandOptions_Parse_ShouldAcceptHelpCaseInsensitively(string option)
+    {
+        var parsed = InstallCommandOptions.Parse([option]);
+
+        Assert.True(parsed.ShowHelp);
     }
 
     private static string CreateTempDirectory(string prefix)

@@ -17,7 +17,8 @@ internal sealed record InstallCommandOptions(
                 continue;
             }
 
-            if (arg is "--help" or "-h")
+            if (arg.Equals("--help", StringComparison.OrdinalIgnoreCase) ||
+                arg.Equals("-h", StringComparison.OrdinalIgnoreCase))
             {
                 showHelp = true;
                 continue;
