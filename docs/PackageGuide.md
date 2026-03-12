@@ -39,7 +39,7 @@ The text-mode installer prompts for:
 Before the installer auto-starts Symphony, it also checks the local Codex CLI:
 
 - `codex --version` must be present and at least the Symphony-validated version
-- if npm can be reached, the installed CLI must also match the latest `@openai/codex` version
+- if npm can be reached, the installed CLI must not be behind the latest `@openai/codex` version
 - Codex authentication must succeed via `codex login status`
 - `auth.json` must exist under `~/.codex/` (or `CODEX_HOME` when set)
 

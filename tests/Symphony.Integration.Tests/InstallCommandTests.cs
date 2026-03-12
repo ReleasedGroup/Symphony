@@ -181,10 +181,10 @@ public sealed class InstallCommandTests
                 CancellationToken.None,
                 CreateRuntime(bundleRoot, executableName, readyToStart: false));
 
-            Assert.Equal(1, exitCode);
+            Assert.Equal(0, exitCode);
             Assert.Contains("Codex CLI check:", output.ToString(), StringComparison.Ordinal);
             Assert.Contains("Fix the Codex CLI items above before Symphony starts.", output.ToString(), StringComparison.Ordinal);
-            Assert.Contains("Installation completed, but Symphony was not started.", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Codex is not ready; installation has completed, but Symphony will not be started automatically.", output.ToString(), StringComparison.Ordinal);
         }
         finally
         {

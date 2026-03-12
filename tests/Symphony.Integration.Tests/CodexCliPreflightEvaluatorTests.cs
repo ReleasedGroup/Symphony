@@ -21,6 +21,7 @@ public sealed class CodexCliPreflightEvaluatorTests
                     ["codex login status"] = new(0, "Logged in using ChatGPT", string.Empty)
                 }),
                 codexHome,
+                TimeSpan.FromSeconds(1),
                 CancellationToken.None);
 
             Assert.True(result.IsReadyToStart);
@@ -53,6 +54,7 @@ public sealed class CodexCliPreflightEvaluatorTests
                     ["codex login status"] = new(0, "Logged in using ChatGPT", string.Empty)
                 }),
                 codexHome,
+                TimeSpan.FromSeconds(1),
                 CancellationToken.None);
 
             Assert.False(result.IsReadyToStart);
@@ -81,6 +83,7 @@ public sealed class CodexCliPreflightEvaluatorTests
                     ["codex login status"] = new(0, "Logged in using ChatGPT", string.Empty)
                 }),
                 codexHome,
+                TimeSpan.FromSeconds(1),
                 CancellationToken.None);
 
             Assert.False(result.IsReadyToStart);
@@ -118,6 +121,7 @@ public sealed class CodexCliPreflightEvaluatorTests
                     ["codex login status"] = new(0, "Logged in using ChatGPT", string.Empty)
                 }),
                 codexHome,
+                TimeSpan.FromSeconds(1),
                 CancellationToken.None);
 
             Assert.True(result.IsReadyToStart);
@@ -126,6 +130,59 @@ public sealed class CodexCliPreflightEvaluatorTests
             Assert.Contains(
                 result.Warnings,
                 warning => warning.Contains("local Codex version cache", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            TryDeleteDirectory(codexHome);
+        }
+    }
+
+    [Fact]
+    public async Task CheckAsync_ShouldPropagateCallerCancellation()
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        cancellationTokenSource.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            CodexCliPreflightEvaluator.CheckAsync(
+                (_, token) => Task.FromCanceled<CodexCliCommandResult>(token),
+                Path.Combine(Path.GetTempPath(), $"symphony-codex-home-{Guid.NewGuid():N}"),
+                TimeSpan.FromSeconds(1),
+                cancellationTokenSource.Token));
+    }
+
+    [Fact]
+    public async Task CheckAsync_ShouldTreatTimedOutNpmProbeAsUnverifiedLatestVersion()
+    {
+        var codexHome = CreateTempDirectory("codex-home");
+
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(codexHome, "auth.json"), "{}");
+            await File.WriteAllTextAsync(
+                Path.Combine(codexHome, "version.json"),
+                """
+                {
+                  "latest_version": "0.114.0"
+                }
+                """);
+
+            var result = await CodexCliPreflightEvaluator.CheckAsync(
+                (command, token) => command.Equals("npm view @openai/codex version", StringComparison.Ordinal)
+                    ? WaitForCancellationAsync(token)
+                    : Task.FromResult(command switch
+                    {
+                        "codex --version" => new CodexCliCommandResult(0, "codex-cli 0.114.0", string.Empty),
+                        "codex login status" => new CodexCliCommandResult(0, "Logged in using ChatGPT", string.Empty),
+                        _ => throw new InvalidOperationException($"Unexpected command '{command}'.")
+                    }),
+                codexHome,
+                TimeSpan.FromMilliseconds(50),
+                CancellationToken.None);
+
+            Assert.True(result.IsReadyToStart);
+            Assert.Equal("cache", result.LatestVersionSource);
+            Assert.False(result.LatestVersionVerified);
         }
         finally
         {
@@ -152,6 +209,12 @@ public sealed class CodexCliPreflightEvaluatorTests
         var path = Path.Combine(Path.GetTempPath(), $"symphony-{prefix}-{Guid.NewGuid():N}");
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static async Task<CodexCliCommandResult> WaitForCancellationAsync(CancellationToken cancellationToken)
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        throw new InvalidOperationException("Expected cancellation before completion.");
     }
 
     private static void TryDeleteDirectory(string path)

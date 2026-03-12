@@ -7,18 +7,20 @@ namespace Symphony.Host.Setup;
 internal static class CodexCliPreflightEvaluator
 {
     internal const string ValidatedNpmVersion = "0.114.0";
+    internal static readonly TimeSpan DefaultProbeTimeout = TimeSpan.FromSeconds(10);
     private const string CodexPackageName = "@openai/codex";
     private const string AuthFileName = "auth.json";
     private const string VersionCacheFileName = "version.json";
 
     public static Task<CodexCliPreflightResult> CheckAsync(CancellationToken cancellationToken)
     {
-        return CheckAsync(RunCommandAsync, ResolveCodexHomePath(), cancellationToken);
+        return CheckAsync(RunCommandAsync, ResolveCodexHomePath(), DefaultProbeTimeout, cancellationToken);
     }
 
     internal static async Task<CodexCliPreflightResult> CheckAsync(
         Func<string, CancellationToken, Task<CodexCliCommandResult>> runCommandAsync,
         string codexHomePath,
+        TimeSpan probeTimeout,
         CancellationToken cancellationToken)
     {
         var blockingIssues = new List<string>();
@@ -35,7 +37,11 @@ internal static class CodexCliPreflightEvaluator
         var loginConfigured = false;
         CodexCliVersion installedVersion = default;
 
-        var installedVersionResult = await SafeRunAsync(runCommandAsync, "codex --version", cancellationToken);
+        var installedVersionResult = await SafeRunAsync(
+            runCommandAsync,
+            "codex --version",
+            probeTimeout,
+            cancellationToken);
         var hasInstalledVersion = installedVersionResult is { ExitCode: 0 } &&
             CodexCliVersion.TryParse(installedVersionResult.StandardOutput, out installedVersion);
 
@@ -59,7 +65,11 @@ internal static class CodexCliPreflightEvaluator
                     $"Update Codex CLI with `npm install -g {CodexPackageName}@{ValidatedNpmVersion}`.");
             }
 
-            var latestVersion = await ResolveLatestVersionAsync(runCommandAsync, codexHomePath, cancellationToken);
+            var latestVersion = await ResolveLatestVersionAsync(
+                runCommandAsync,
+                codexHomePath,
+                probeTimeout,
+                cancellationToken);
             if (latestVersion.Version is not null)
             {
                 latestVersionText = latestVersion.Version.Value.ToString();
@@ -86,7 +96,11 @@ internal static class CodexCliPreflightEvaluator
                     "Could not verify the latest Codex CLI version from npm or the local Codex version cache.");
             }
 
-            var loginStatus = await SafeRunAsync(runCommandAsync, "codex login status", cancellationToken);
+            var loginStatus = await SafeRunAsync(
+                runCommandAsync,
+                "codex login status",
+                probeTimeout,
+                cancellationToken);
             loginConfigured = loginStatus is { ExitCode: 0 };
             if (!loginConfigured)
             {
@@ -122,11 +136,19 @@ internal static class CodexCliPreflightEvaluator
     private static async Task<CodexCliCommandResult?> SafeRunAsync(
         Func<string, CancellationToken, Task<CodexCliCommandResult>> runCommandAsync,
         string command,
+        TimeSpan probeTimeout,
         CancellationToken cancellationToken)
     {
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(probeTimeout);
+
         try
         {
-            return await runCommandAsync(command, cancellationToken);
+            return await runCommandAsync(command, timeoutCts.Token);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -137,9 +159,14 @@ internal static class CodexCliPreflightEvaluator
     private static async Task<(CodexCliVersion? Version, string? Source)> ResolveLatestVersionAsync(
         Func<string, CancellationToken, Task<CodexCliCommandResult>> runCommandAsync,
         string codexHomePath,
+        TimeSpan probeTimeout,
         CancellationToken cancellationToken)
     {
-        var npmResult = await SafeRunAsync(runCommandAsync, $"npm view {CodexPackageName} version", cancellationToken);
+        var npmResult = await SafeRunAsync(
+            runCommandAsync,
+            $"npm view {CodexPackageName} version",
+            probeTimeout,
+            cancellationToken);
         if (npmResult is { ExitCode: 0 } &&
             CodexCliVersion.TryParse(npmResult.StandardOutput, out var npmVersion))
         {

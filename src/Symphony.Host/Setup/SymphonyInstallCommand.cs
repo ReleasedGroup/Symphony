@@ -159,7 +159,7 @@ internal static class SymphonyInstallCommand
 
         if (!codexReady)
         {
-            return 1;
+            return 0;
         }
 
         var shouldLaunch = await PromptConfirmationAsync(
@@ -239,7 +239,7 @@ internal static class SymphonyInstallCommand
 
             if (!retry)
             {
-                await output.WriteLineAsync("Installation completed, but Symphony was not started.");
+                await output.WriteLineAsync("Codex is not ready; installation has completed, but Symphony will not be started automatically.");
                 return false;
             }
 
