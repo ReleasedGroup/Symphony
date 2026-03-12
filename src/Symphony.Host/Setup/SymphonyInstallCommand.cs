@@ -43,7 +43,8 @@ internal static class SymphonyInstallCommand
 
                 Interactive installer for a self-contained Symphony instance.
                 The installer creates a dedicated WORKFLOW.md, appsettings.json,
-                .env, and run scripts in the selected folder.
+                .env, and run scripts in the selected folder. Before launch,
+                it also checks the local Codex CLI version and auth state.
                 """);
             return 0;
         }
@@ -144,7 +145,19 @@ internal static class SymphonyInstallCommand
         await output.WriteLineAsync($"Instance URL: {url}");
         await output.WriteLineAsync($"Start again later with '{GetPreferredRunCommand()}' from the instance folder.");
 
+        var codexReady = await EnsureCodexReadyAsync(
+            options,
+            input,
+            output,
+            runtime,
+            cancellationToken);
+
         if (options.NoLaunch)
+        {
+            return 0;
+        }
+
+        if (!codexReady)
         {
             return 0;
         }
@@ -190,6 +203,50 @@ internal static class SymphonyInstallCommand
         return process.ExitCode;
     }
 
+    private static async Task<bool> EnsureCodexReadyAsync(
+        InstallCommandOptions options,
+        TextReader input,
+        TextWriter output,
+        SymphonyInstallationRuntime runtime,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var preflight = await runtime.CodexCliPreflightAsync(cancellationToken);
+            await WriteCodexPreflightAsync(output, preflight, cancellationToken);
+
+            if (preflight.IsReadyToStart)
+            {
+                return true;
+            }
+
+            await output.WriteLineAsync("Fix the Codex CLI items above before Symphony starts.");
+
+            if (options.NoLaunch)
+            {
+                await output.WriteLineAsync($"Before your first run, fix the Codex CLI items above and then start Symphony with '{GetPreferredRunCommand()}'.");
+                return false;
+            }
+
+            var retry = await PromptConfirmationAsync(
+                input,
+                output,
+                "Re-check Codex CLI after you update/sign in?",
+                defaultValue: true,
+                cancellationToken);
+
+            if (!retry)
+            {
+                await output.WriteLineAsync("Codex is not ready; installation has completed, but Symphony will not be started automatically.");
+                return false;
+            }
+
+            await output.WriteLineAsync("Re-checking Codex CLI...");
+        }
+    }
+
     private static async Task CopyBundleAsync(string sourceRoot, string destinationRoot, CancellationToken cancellationToken)
     {
         if (PathsEqual(sourceRoot, destinationRoot))
@@ -217,6 +274,68 @@ internal static class SymphonyInstallCommand
             File.Copy(sourceFile, destinationFile, overwrite: true);
             TryCopyUnixMode(sourceFile, destinationFile);
         }
+    }
+
+    private static async Task WriteCodexPreflightAsync(
+        TextWriter output,
+        CodexCliPreflightResult preflight,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        await output.WriteLineAsync(string.Empty);
+        await output.WriteLineAsync("Codex CLI check:");
+        await output.WriteLineAsync($"- Installed version: {preflight.InstalledVersion ?? "not found"}");
+        await output.WriteLineAsync($"- Symphony validated version: {preflight.ValidatedVersion}");
+        await output.WriteLineAsync($"- Latest available version: {FormatLatestVersion(preflight)}");
+        await output.WriteLineAsync($"- Auth file: {preflight.AuthJsonPath}");
+        await output.WriteLineAsync($"- Auth file present: {(preflight.HasAuthJson ? "yes" : "no")}");
+        await output.WriteLineAsync($"- Login status: {(preflight.LoginConfigured ? "ready" : "not ready")}");
+
+        if (preflight.Warnings.Count > 0)
+        {
+            await output.WriteLineAsync("Notes:");
+            foreach (var warning in preflight.Warnings)
+            {
+                await output.WriteLineAsync($"- {warning}");
+            }
+        }
+
+        if (preflight.IsReadyToStart)
+        {
+            await output.WriteLineAsync("Codex CLI is ready.");
+            return;
+        }
+
+        await output.WriteLineAsync("Before starting Symphony, fix these Codex CLI items:");
+        foreach (var issue in preflight.BlockingIssues)
+        {
+            await output.WriteLineAsync($"- {issue}");
+        }
+
+        if (preflight.RemediationSteps.Count > 0)
+        {
+            await output.WriteLineAsync("Suggested next steps:");
+            foreach (var step in preflight.RemediationSteps)
+            {
+                await output.WriteLineAsync($"- {step}");
+            }
+        }
+    }
+
+    private static string FormatLatestVersion(CodexCliPreflightResult preflight)
+    {
+        if (string.IsNullOrWhiteSpace(preflight.LatestVersion))
+        {
+            return "unavailable";
+        }
+
+        if (string.IsNullOrWhiteSpace(preflight.LatestVersionSource))
+        {
+            return preflight.LatestVersion;
+        }
+
+        return $"{preflight.LatestVersion} ({preflight.LatestVersionSource})";
     }
 
     private static bool ShouldExclude(string relativePath)
