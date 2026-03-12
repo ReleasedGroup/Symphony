@@ -22,6 +22,8 @@ See the full guide at [docs/UserGuide.md](docs/UserGuide.md).
 
 Container deployment guidance and sample artifacts are in [docs/ContainerGuide.md](docs/ContainerGuide.md).
 
+Release bundle installation guidance is in [docs/PackageGuide.md](docs/PackageGuide.md).
+
 ## Runtime Behavior
 
 - A Tailwind-powered dashboard now renders orchestration health, live agent activity, tracked issue distribution, rate limits, leases, and per-issue drill-down from the durable API state.
@@ -47,6 +49,17 @@ $env:SYMPHONY_RUN_REAL_INTEGRATION_TESTS = "1"
 $env:GITHUB_TOKEN = "<token>"
 & 'C:\Program Files\dotnet\dotnet.exe' test tests/Symphony.Integration.Tests/Symphony.Integration.Tests.csproj --filter RealIntegrationTests
 ```
+
+## Release Packages
+
+GitHub Actions now provides:
+
+- `ci.yml` for restore/build/test on pushes and pull requests
+- `release-packages.yml` for versioned multi-platform bundles on published GitHub Releases
+
+Published releases attach self-contained archives for `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64`, and `osx-arm64`.
+
+After extracting a release bundle, run `setup-symphony.cmd` on Windows or `setup-symphony.sh` on macOS/Linux to generate an instance-specific configuration and start Symphony on its own loopback URL.
 
 ## Running Locally
 

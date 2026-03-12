@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Symphony.Core.Abstractions;
+using Symphony.Core.Metadata;
 using Symphony.Core.Models;
 
 namespace Symphony.Infrastructure.Agent.Codex;
@@ -15,7 +16,6 @@ public sealed partial class CodexAgentRunner(
     private const int MaxCapturedOutputChars = 256_000;
     private const int KillGracePeriodMs = 10_000;
     private const string ClientName = "symphony";
-    private const string ClientVersion = "1.0";
 
     public Task<AgentRunResult> RunIssueAsync(
         AgentRunRequest request,
@@ -247,7 +247,7 @@ public sealed partial class CodexAgentRunner(
                 method: "initialize",
                 @params: new
                 {
-                    clientInfo = new { name = ClientName, version = ClientVersion },
+                    clientInfo = new { name = ClientName, version = SymphonyProductInfo.ProtocolVersion },
                     capabilities = BuildCapabilities(request)
                 },
                 cancellationToken);

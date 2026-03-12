@@ -1,0 +1,178 @@
+name: release-packages
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore Symphony.slnx
+
+      - name: Build
+        run: dotnet build Symphony.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test Symphony.slnx --configuration Release --no-build
+
+  package:
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            rid: win-x64
+            archive_extension: zip
+          - runner: windows-latest
+            rid: win-arm64
+            archive_extension: zip
+          - runner: ubuntu-latest
+            rid: linux-x64
+            archive_extension: tar.gz
+          - runner: ubuntu-latest
+            rid: linux-arm64
+            archive_extension: tar.gz
+          - runner: macos-latest
+            rid: osx-x64
+            archive_extension: tar.gz
+          - runner: macos-latest
+            rid: osx-arm64
+            archive_extension: tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Derive release version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.event.release.tag_name }}'
+          if ($tag.StartsWith('v', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $tag = $tag.Substring(1)
+          }
+
+          if ($tag -notmatch '^(?<prefix>\d+\.\d+\.\d+)(?:-(?<suffix>[0-9A-Za-z\.-]+))?$') {
+            throw "Release tag '$tag' must look like v1.2.3 or v1.2.3-rc.1."
+          }
+
+          "version=$tag" >> $env:GITHUB_OUTPUT
+          "version_prefix=$($Matches.prefix)" >> $env:GITHUB_OUTPUT
+          "version_suffix=$($Matches.suffix)" >> $env:GITHUB_OUTPUT
+
+      - name: Restore host project for runtime
+        shell: pwsh
+        run: dotnet restore src/Symphony.Host/Symphony.Host.csproj --runtime '${{ matrix.rid }}'
+
+      - name: Publish release bundle
+        shell: pwsh
+        env:
+          SYMPHONY_VERSION: ${{ steps.version.outputs.version }}
+          SYMPHONY_VERSION_PREFIX: ${{ steps.version.outputs.version_prefix }}
+          SYMPHONY_VERSION_SUFFIX: ${{ steps.version.outputs.version_suffix }}
+        run: |
+          $publishDir = Join-Path $PWD "artifacts/publish/${{ matrix.rid }}"
+          $arguments = @(
+            'publish',
+            'src/Symphony.Host/Symphony.Host.csproj',
+            '--configuration', 'Release',
+            '--runtime', '${{ matrix.rid }}',
+            '--self-contained', 'true',
+            '--output', $publishDir,
+            "-p:Version=$env:SYMPHONY_VERSION",
+            "-p:VersionPrefix=$env:SYMPHONY_VERSION_PREFIX",
+            "-p:InformationalVersion=$env:SYMPHONY_VERSION"
+          )
+
+          if ([string]::IsNullOrWhiteSpace($env:SYMPHONY_VERSION_SUFFIX)) {
+            $arguments += '-p:VersionSuffix='
+          }
+          else {
+            $arguments += "-p:VersionSuffix=$env:SYMPHONY_VERSION_SUFFIX"
+          }
+
+          dotnet @arguments
+
+          if ($IsLinux -or $IsMacOS) {
+            chmod +x (Join-Path $publishDir 'Symphony')
+            chmod +x (Join-Path $publishDir 'setup-symphony.sh')
+          }
+
+      - name: Archive release bundle
+        id: archive
+        shell: pwsh
+        env:
+          SYMPHONY_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $publishDir = Join-Path $PWD "artifacts/publish/${{ matrix.rid }}"
+          $archiveBaseName = "Symphony-$env:SYMPHONY_VERSION-${{ matrix.rid }}"
+          $releaseDir = Join-Path $PWD 'artifacts/release'
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+
+          if ('${{ matrix.archive_extension }}' -eq 'zip') {
+            $archivePath = Join-Path $releaseDir "$archiveBaseName.zip"
+            if (Test-Path $archivePath) {
+              Remove-Item $archivePath -Force
+            }
+
+            Compress-Archive -Path (Join-Path $publishDir '*') -DestinationPath $archivePath
+          }
+          else {
+            $archivePath = Join-Path $releaseDir "$archiveBaseName.tar.gz"
+            tar -czf $archivePath -C $publishDir .
+          }
+
+          $hash = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumPath = "$archivePath.sha256"
+          Set-Content -Path $checksumPath -Value "$hash *$(Split-Path $archivePath -Leaf)"
+
+          "archive_path=$archivePath" >> $env:GITHUB_OUTPUT
+          "checksum_path=$checksumPath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.rid }}
+          path: |
+            ${{ steps.archive.outputs.archive_path }}
+            ${{ steps.archive.outputs.checksum_path }}
+
+  publish-release:
+    needs: package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Attach archives to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: release-assets/*

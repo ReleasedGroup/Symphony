@@ -178,6 +178,7 @@ function renderHeroPanel() {
             Live orchestration visibility across health, workload, activity, leases, and Codex spend for the current Symphony host.
           </p>
           <div class="mt-6 flex flex-wrap gap-3 text-sm text-slate-300">
+            <span class="glass-badge">${escapeHtml(`v${state.runtime?.application?.version || "unknown"}`)}</span>
             <span class="glass-badge">${escapeHtml(state.runtime?.orchestration?.instanceId || "instance auto-id")}</span>
             <span class="glass-badge">${escapeHtml(summary)}</span>
             <span class="glass-badge">${escapeHtml(workflow?.sourcePath || "workflow unavailable")}</span>
@@ -545,6 +546,7 @@ function renderInstanceStatus() {
         <div class="rounded-3xl border border-white/10 bg-white/[0.035] p-5">
           <div class="text-xs uppercase tracking-[0.22em] text-slate-400">Orchestrator</div>
           <div class="mt-2 space-y-2 text-sm text-slate-300">
+            <div>Version: ${escapeHtml(runtime?.application?.version || "unknown")}</div>
             <div>Instance: ${escapeHtml(runtime?.orchestration?.instanceId || "auto-generated")}</div>
             <div>Lease: ${escapeHtml(runtime?.orchestration?.leaseName || "poll-dispatch")}</div>
             <div>Lease TTL: ${escapeHtml(formatSeconds(runtime?.orchestration?.leaseTtlSeconds || 0))}</div>
