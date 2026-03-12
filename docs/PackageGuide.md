@@ -36,6 +36,15 @@ The text-mode installer prompts for:
 - Instance folder
 - HTTP port
 
+Before the installer auto-starts Symphony, it also checks the local Codex CLI:
+
+- `codex --version` must be present and at least the Symphony-validated version
+- if npm can be reached, the installed CLI must also match the latest `@openai/codex` version
+- Codex authentication must succeed via `codex login status`
+- `auth.json` must exist under `~/.codex/` (or `CODEX_HOME` when set)
+
+If one of those checks fails, the installer pauses and tells you what to fix before the first start. With `--no-launch`, installation still completes, but the installer prints the Codex prerequisites you need to fix before running the instance later.
+
 It then creates an isolated instance with:
 
 - its own `WORKFLOW.md`
