@@ -1,4 +1,6 @@
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Symphony.Core.Abstractions;
 using Symphony.Core.Models;
@@ -91,35 +93,64 @@ public sealed class CodexAgentRunnerTests
     [Fact]
     public async Task RunIssueAsync_ShouldDeriveTotalTokensFromAbsoluteUsagePayloadsWithoutExplicitTotals()
     {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            return;
-        }
-
-        var updates = new List<AgentRunUpdate>();
-        var runner = CreateRunner(new SequencedTrackerClient(["Closed"]));
-        using var harness = CreateAppServerHarness(AbsoluteUsageWithoutTotalCompletionScript());
-
-        var result = await runner.RunIssueAsync(
-            CreateRequest(
-                "id-4b",
-                "#4b",
-                harness.WorkspacePath,
-                harness.Command,
-                30_000,
-                trackerQuery: CreateTrackerQuery()),
-            (update, _) =>
+        var update = CreateProtocolUpdate("""
             {
-                updates.Add(update);
-                return Task.CompletedTask;
-            });
+              "method": "notification",
+              "params": {
+                "message": "counting",
+                "totalTokenUsage": {
+                  "inputTokens": 11,
+                  "outputTokens": 7
+                }
+              }
+            }
+            """);
 
-        Assert.True(result.Success, result.Stderr);
+        Assert.Equal(11, update.InputTokens);
+        Assert.Equal(7, update.OutputTokens);
+        Assert.Equal(18, update.TotalTokens);
+    }
 
-        Assert.Contains(updates, update =>
-            update.InputTokens == 11 &&
-            update.OutputTokens == 7 &&
-            update.TotalTokens == 18);
+    [Fact]
+    public void CreateProtocolUpdate_ShouldClampDerivedTotalTokensToIntMaxValue()
+    {
+        var update = CreateProtocolUpdate($$"""
+            {
+              "method": "notification",
+              "params": {
+                "message": "counting",
+                "totalTokenUsage": {
+                  "inputTokens": {{int.MaxValue}},
+                  "outputTokens": 1
+                }
+              }
+            }
+            """);
+
+        Assert.Equal(int.MaxValue, update.InputTokens);
+        Assert.Equal(1, update.OutputTokens);
+        Assert.Equal(int.MaxValue, update.TotalTokens);
+    }
+
+    [Fact]
+    public void CreateProtocolUpdate_ShouldNotDeriveTotalTokensFromNegativeUsageValues()
+    {
+        var update = CreateProtocolUpdate("""
+            {
+              "method": "notification",
+              "params": {
+                "message": "counting",
+                "totalTokenUsage": {
+                  "inputTokens": -1,
+                  "outputTokens": 7
+                }
+              }
+            }
+            """);
+
+        Assert.Equal(-1, update.InputTokens);
+        Assert.Equal(7, update.OutputTokens);
+        Assert.Null(update.TotalTokens);
     }
 
     [Fact]
@@ -374,22 +405,6 @@ public sealed class CodexAgentRunnerTests
         }
         """;
 
-    private static string AbsoluteUsageWithoutTotalCompletionScript() => """
-        while (($line = [Console]::In.ReadLine()) -ne $null) {
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            $request = $line | ConvertFrom-Json
-            if ($request.method -eq 'initialize') { @{ id = $request.id; result = @{ serverInfo = @{ name = 'fake'; version = '1.0' } } } | ConvertTo-Json -Compress; continue }
-            if ($request.method -eq 'thread/start') { @{ id = $request.id; result = @{ thread = @{ id = 'thread-1' } } } | ConvertTo-Json -Compress; continue }
-            if ($request.method -eq 'turn/start') {
-                @{ id = $request.id; result = @{ turn = @{ id = 'turn-1' } } } | ConvertTo-Json -Compress
-                @{ method = 'notification'; params = @{ message = 'counting'; totalTokenUsage = @{ inputTokens = 11; outputTokens = 7 } } } | ConvertTo-Json -Compress
-                @{ method = 'turn/completed'; params = @{ message = 'done' } } | ConvertTo-Json -Compress
-                continue
-            }
-            if ($request.method -eq 'shutdown') { @{ id = $request.id; result = @{ ok = $true } } | ConvertTo-Json -Compress; break }
-        }
-        """;
-
     private static string ApprovalAndToolScript() => """
         while (($line = [Console]::In.ReadLine()) -ne $null) {
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
@@ -513,5 +528,16 @@ public sealed class CodexAgentRunnerTests
         {
             return Task.FromResult(configuredGraphQlResult);
         }
+    }
+
+    private static AgentRunUpdate CreateProtocolUpdate(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var method = typeof(CodexAgentRunner).GetMethod(
+            "CreateProtocolUpdate",
+            BindingFlags.NonPublic | BindingFlags.Static);
+
+        Assert.NotNull(method);
+        return Assert.IsType<AgentRunUpdate>(method!.Invoke(null, [document.RootElement, "notification", null, null, null]));
     }
 }

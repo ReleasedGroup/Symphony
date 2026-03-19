@@ -1175,13 +1175,14 @@ public sealed partial class CodexAgentRunner(
         var totalTokens = GetOptionalInt32(usageElement, "total_tokens")
                           ?? GetOptionalInt32(usageElement, "totalTokens");
 
-        if (totalTokens is null && inputTokens.HasValue && outputTokens.HasValue)
+        if (totalTokens is null &&
+            inputTokens is >= 0 &&
+            outputTokens is >= 0)
         {
             var computedTotal = (long)inputTokens.Value + outputTokens.Value;
-            if (computedTotal <= int.MaxValue)
-            {
-                totalTokens = (int)computedTotal;
-            }
+            totalTokens = computedTotal > int.MaxValue
+                ? int.MaxValue
+                : (int)computedTotal;
         }
 
         if (inputTokens is null && outputTokens is null && totalTokens is null)
