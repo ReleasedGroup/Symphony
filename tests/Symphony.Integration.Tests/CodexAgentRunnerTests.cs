@@ -89,6 +89,40 @@ public sealed class CodexAgentRunnerTests
     }
 
     [Fact]
+    public async Task RunIssueAsync_ShouldDeriveTotalTokensFromAbsoluteUsagePayloadsWithoutExplicitTotals()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return;
+        }
+
+        var updates = new List<AgentRunUpdate>();
+        var runner = CreateRunner(new SequencedTrackerClient(["Closed"]));
+        using var harness = CreateAppServerHarness(AbsoluteUsageWithoutTotalCompletionScript());
+
+        var result = await runner.RunIssueAsync(
+            CreateRequest(
+                "id-4b",
+                "#4b",
+                harness.WorkspacePath,
+                harness.Command,
+                30_000,
+                trackerQuery: CreateTrackerQuery()),
+            (update, _) =>
+            {
+                updates.Add(update);
+                return Task.CompletedTask;
+            });
+
+        Assert.True(result.Success, result.Stderr);
+
+        Assert.Contains(updates, update =>
+            update.InputTokens == 11 &&
+            update.OutputTokens == 7 &&
+            update.TotalTokens == 18);
+    }
+
+    [Fact]
     public async Task RunIssueAsync_ShouldReuseThreadAcrossContinuationTurnsUntilIssueStopsBeingActive()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -334,6 +368,22 @@ public sealed class CodexAgentRunnerTests
                 $turnIndex++
                 @{ id = $request.id; result = @{ turn = @{ id = "turn-$turnIndex" } } } | ConvertTo-Json -Compress
                 @{ method = 'turn/completed'; params = @{ message = "turn-$turnIndex done"; usage = @{ input_tokens = $turnIndex; output_tokens = $turnIndex; total_tokens = ($turnIndex * 2) } } } | ConvertTo-Json -Compress
+                continue
+            }
+            if ($request.method -eq 'shutdown') { @{ id = $request.id; result = @{ ok = $true } } | ConvertTo-Json -Compress; break }
+        }
+        """;
+
+    private static string AbsoluteUsageWithoutTotalCompletionScript() => """
+        while (($line = [Console]::In.ReadLine()) -ne $null) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $request = $line | ConvertFrom-Json
+            if ($request.method -eq 'initialize') { @{ id = $request.id; result = @{ serverInfo = @{ name = 'fake'; version = '1.0' } } } | ConvertTo-Json -Compress; continue }
+            if ($request.method -eq 'thread/start') { @{ id = $request.id; result = @{ thread = @{ id = 'thread-1' } } } | ConvertTo-Json -Compress; continue }
+            if ($request.method -eq 'turn/start') {
+                @{ id = $request.id; result = @{ turn = @{ id = 'turn-1' } } } | ConvertTo-Json -Compress
+                @{ method = 'notification'; params = @{ message = 'counting'; totalTokenUsage = @{ inputTokens = 11; outputTokens = 7 } } } | ConvertTo-Json -Compress
+                @{ method = 'turn/completed'; params = @{ message = 'done' } } | ConvertTo-Json -Compress
                 continue
             }
             if ($request.method -eq 'shutdown') { @{ id = $request.id; result = @{ ok = $true } } | ConvertTo-Json -Compress; break }
