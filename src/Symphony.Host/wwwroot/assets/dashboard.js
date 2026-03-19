@@ -35,6 +35,7 @@ const state = {
 
 const refreshIntervalMs = 15000;
 let refreshHandle = null;
+const baseDocumentTitle = document.title;
 
 document.addEventListener("click", async event => {
   const issueButton = event.target.closest("[data-issue-identifier]");
@@ -136,6 +137,7 @@ async function selectIssue(issueIdentifier, updateHash = true) {
 }
 
 function render() {
+  updateDocumentTitle();
   elements.heroPanel.innerHTML = renderHeroPanel();
   elements.alert.innerHTML = renderAlert();
   elements.metricGrid.innerHTML = renderMetricCards();
@@ -601,6 +603,13 @@ function renderEmptyState(title, description) {
 
 function renderCompactEmpty(message) {
   return `<div class="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-3 text-sm text-slate-400">${escapeHtml(message)}</div>`;
+}
+
+function updateDocumentTitle() {
+  const owner = state.runtime?.workflow?.tracker?.owner;
+  const repo = state.runtime?.workflow?.tracker?.repo;
+  const repoLabel = [owner, repo].filter(Boolean).join("/");
+  document.title = repoLabel ? `${repoLabel} | ${baseDocumentTitle}` : baseDocumentTitle;
 }
 
 function activeLeaseCount(snapshot) {

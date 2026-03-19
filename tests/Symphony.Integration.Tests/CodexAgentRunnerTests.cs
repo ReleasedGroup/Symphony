@@ -1,4 +1,6 @@
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Symphony.Core.Abstractions;
 using Symphony.Core.Models;
@@ -86,6 +88,69 @@ public sealed class CodexAgentRunnerTests
         Assert.True(result.Success, result.Stderr);
         Assert.Contains("\"turn/completed\"", result.Stdout, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(updates, update => update.EventType == "turn_completed");
+    }
+
+    [Fact]
+    public async Task RunIssueAsync_ShouldDeriveTotalTokensFromAbsoluteUsagePayloadsWithoutExplicitTotals()
+    {
+        var update = CreateProtocolUpdate("""
+            {
+              "method": "notification",
+              "params": {
+                "message": "counting",
+                "totalTokenUsage": {
+                  "inputTokens": 11,
+                  "outputTokens": 7
+                }
+              }
+            }
+            """);
+
+        Assert.Equal(11, update.InputTokens);
+        Assert.Equal(7, update.OutputTokens);
+        Assert.Equal(18, update.TotalTokens);
+    }
+
+    [Fact]
+    public void CreateProtocolUpdate_ShouldClampDerivedTotalTokensToIntMaxValue()
+    {
+        var update = CreateProtocolUpdate($$"""
+            {
+              "method": "notification",
+              "params": {
+                "message": "counting",
+                "totalTokenUsage": {
+                  "inputTokens": {{int.MaxValue}},
+                  "outputTokens": 1
+                }
+              }
+            }
+            """);
+
+        Assert.Equal(int.MaxValue, update.InputTokens);
+        Assert.Equal(1, update.OutputTokens);
+        Assert.Equal(int.MaxValue, update.TotalTokens);
+    }
+
+    [Fact]
+    public void CreateProtocolUpdate_ShouldNotDeriveTotalTokensFromNegativeUsageValues()
+    {
+        var update = CreateProtocolUpdate("""
+            {
+              "method": "notification",
+              "params": {
+                "message": "counting",
+                "totalTokenUsage": {
+                  "inputTokens": -1,
+                  "outputTokens": 7
+                }
+              }
+            }
+            """);
+
+        Assert.Equal(-1, update.InputTokens);
+        Assert.Equal(7, update.OutputTokens);
+        Assert.Null(update.TotalTokens);
     }
 
     [Fact]
@@ -463,5 +528,16 @@ public sealed class CodexAgentRunnerTests
         {
             return Task.FromResult(configuredGraphQlResult);
         }
+    }
+
+    private static AgentRunUpdate CreateProtocolUpdate(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var method = typeof(CodexAgentRunner).GetMethod(
+            "CreateProtocolUpdate",
+            BindingFlags.NonPublic | BindingFlags.Static);
+
+        Assert.NotNull(method);
+        return Assert.IsType<AgentRunUpdate>(method!.Invoke(null, [document.RootElement, "notification", null, null, null]));
     }
 }
