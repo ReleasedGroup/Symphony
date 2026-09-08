@@ -813,6 +813,9 @@ scheduling a continuation retry after successful execution. All configured label
 case-insensitively; milestones match by title or number, as during candidate dispatch. A successful
 run that no longer matches these filters releases its claim without a continuation retry. No tracker
 writes or PR merge are implied. Without label/milestone filters, existing state-based behavior remains.
+When this post-success refresh succeeds, active-state eligibility is checked as well. Transient refresh
+failures preserve the successful attempt and normal continuation retry; retry dispatch still checks
+current candidates before starting another worker. Cancellation requests continue to propagate.
 
 ### 8.6 Startup Terminal Workspace Cleanup
 

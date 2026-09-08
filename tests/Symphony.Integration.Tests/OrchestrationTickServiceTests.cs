@@ -21,9 +21,12 @@ public sealed class OrchestrationTickServiceTests
     [InlineData(true, false, false)]
     [InlineData(true, true, true)]
     [InlineData(false, false, true)]
+    [InlineData(true, true, false, "Closed")]
+    [InlineData(true, true, false, "Backlog")]
+    [InlineData(true, true, true, "Open", true)]
     [Trait("Spec", "17.4")]
     public async Task Coordinator_ShouldOnlyScheduleSuccessfulContinuationWhileFiltersMatch(
-        bool configureLabels, bool matchesFilters, bool expectRetry)
+        bool configureLabels, bool matchesFilters, bool expectRetry, string refreshedState = "Open", bool refreshFails = false)
     {
         var root = Directory.CreateTempSubdirectory("symphony-continuation-").FullName;
         try
@@ -38,7 +41,7 @@ public sealed class OrchestrationTickServiceTests
             builder.Services.AddDbContext<SymphonyDbContext>(options => options.UseSqlite($"Data Source={Path.Combine(root, "test.db")};Pooling=False"));
             builder.Services.AddSingleton(TimeProvider.System);
             builder.Services.AddScoped<IOrchestrationCoordinationStore, OrchestrationCoordinationStore>();
-            builder.Services.AddSingleton<ITrackerClient>(new FakeTrackerClient([], new Dictionary<string, string> { ["issue-1"] = "Open" }, matchesFilters));
+            builder.Services.AddSingleton<ITrackerClient>(new FakeTrackerClient([], new Dictionary<string, string> { ["issue-1"] = refreshedState }, matchesFilters, refreshFails));
             builder.Services.AddSingleton<IWorkspaceManager>(new PreparedWorkspaceManager(root));
             builder.Services.AddSingleton<IWorkspaceHookRunner, NoOpHookRunner>();
             builder.Services.AddSingleton<IWorkflowPromptRenderer, WorkflowPromptRenderer>();
@@ -56,10 +59,15 @@ public sealed class OrchestrationTickServiceTests
             var request = new IssueExecutionRequest("run-1", "attempt-1", "instance-1", null, BuildIssue("issue-1", "#1", "Open", null), workflow);
             // Await the complete lifecycle, including claim release, without polling the fire-and-forget entry point.
             var execute = typeof(IssueExecutionCoordinator).GetMethod("ExecuteRunAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-            await (Task)execute.Invoke(coordinator, [request, new CancellationTokenSource()])!;
+            using var cancellationSource = new CancellationTokenSource();
+            await (Task)execute.Invoke(coordinator, [request, cancellationSource])!;
             db.ChangeTracker.Clear();
 
             Assert.Equal(expectRetry ? 1 : 0, await db.RetryQueue.CountAsync());
+            if (expectRetry)
+            {
+                Assert.Equal(RetryDelayTypes.Continuation, (await db.RetryQueue.SingleAsync()).DelayType);
+            }
             Assert.Equal(RunStatusNames.Succeeded, (await db.RunAttempts.SingleAsync()).Status);
             var run = await db.Runs.SingleAsync();
             Assert.Equal("Open", run.State);
@@ -718,7 +726,8 @@ public sealed class OrchestrationTickServiceTests
     private sealed class FakeTrackerClient(
         IReadOnlyList<NormalizedIssue> issues,
         IReadOnlyDictionary<string, string>? issueStatesById = null,
-        bool matchesCandidateFilters = true) : IGitHubTrackerClient
+        bool matchesCandidateFilters = true,
+        bool refreshFails = false) : IGitHubTrackerClient
     {
         private readonly Dictionary<string, string> statesById = issueStatesById is null
             ? new(StringComparer.OrdinalIgnoreCase)
@@ -737,6 +746,11 @@ public sealed class OrchestrationTickServiceTests
 
         public Task<IReadOnlyList<IssueStateSnapshot>> FetchIssueStatesByIdsAsync(TrackerQuery query, IReadOnlyList<string> issueIds, CancellationToken cancellationToken = default)
         {
+            if (refreshFails)
+            {
+                throw new HttpRequestException("Transient tracker failure");
+            }
+
             var snapshots = issueIds
                 .Where(id => statesById.ContainsKey(id))
                 .Select(id => new IssueStateSnapshot(id, statesById[id], matchesCandidateFilters))

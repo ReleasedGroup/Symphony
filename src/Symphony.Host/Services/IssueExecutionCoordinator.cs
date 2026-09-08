@@ -157,22 +157,31 @@ public sealed class IssueExecutionCoordinator(
             if (result.Success)
             {
                 finalStatus = RunStatusNames.Succeeded;
-                var matchesFilters = true;
+                var isEligible = true;
                 if (trackerQuery.Labels.Count > 0 || !string.IsNullOrWhiteSpace(trackerQuery.Milestone))
                 {
                     var trackerClient = scope.ServiceProvider.GetRequiredService<ITrackerClient>();
-                    var snapshots = await trackerClient.FetchIssueStatesByIdsAsync(
-                        trackerQuery, [request.Issue.Id], cancellationToken);
-                    matchesFilters = snapshots.FirstOrDefault(state => state.Id == request.Issue.Id)
-                        ?.MatchesCandidateFilters ?? false;
+                    try
+                    {
+                        var snapshots = await trackerClient.FetchIssueStatesByIdsAsync(
+                            trackerQuery, [request.Issue.Id], cancellationToken);
+                        isEligible = snapshots.FirstOrDefault(state => state.Id == request.Issue.Id)
+                            ?.IsExecutionEligible(trackerQuery.ActiveStates) ?? false;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+                    {
+                        logger.LogWarning(
+                            "Continuation eligibility refresh failed for issue {IssueIdentifier}, run {RunId}; preserving successful outcome and normal continuation retry.",
+                            request.Issue.Identifier, request.RunId);
+                    }
                 }
 
-                if (!matchesFilters)
+                if (!isEligible)
                 {
                     releaseClaim = true;
                     releaseStatus = RunStatusNames.Succeeded;
                     await AppendEventAsync(dbContext, request, "continuation_stopped", LogLevel.Information,
-                        "Issue no longer matches the configured execution filters; continuation stopped.", cancellationToken);
+                        "Issue is no longer eligible for execution; continuation stopped.", cancellationToken);
                 }
                 else
                 {
