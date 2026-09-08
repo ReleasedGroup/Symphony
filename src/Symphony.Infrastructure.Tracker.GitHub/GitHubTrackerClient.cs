@@ -73,6 +73,8 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : ITracke
             ... on Issue {
               id
               state
+              milestone { title number }
+              labels(first: 50) { nodes { name } }
               repository {
                 name
                 owner {
@@ -177,7 +179,12 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : ITracke
                 }
 
                 var normalizedState = NormalizeState(GetOptionalString(issueNode, "state")) ?? "Open";
-                statesById[issueId] = new IssueStateSnapshot(issueId, normalizedState);
+                var issue = ParseIssue(issueNode, includePullRequests: false);
+                statesById[issueId] = new IssueStateSnapshot(
+                    issueId,
+                    normalizedState,
+                    MatchesLabels(issue.Labels, query.Labels) &&
+                    MatchesMilestone(issue.Milestone, issueNode, query.Milestone));
             }
         }
 

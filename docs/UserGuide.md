@@ -121,9 +121,11 @@ For Codex app-server runs, Symphony:
 - starts one app-server subprocess per worker attempt
 - reuses the same `threadId` across continuation turns
 - refreshes the GitHub issue state after each successful turn
-- continues on the live thread until the issue leaves the configured active states or `agent.max_turns` is reached
+- continues on the live thread until the issue leaves the configured active states, stops matching the configured labels or milestone, or `agent.max_turns` is reached
 - keeps parsing strictly on stdout only
 - treats stderr as diagnostics only
+
+For label-gated workflows, the agent can remove the execution label after implementing, verifying, pushing, and opening a PR. Symphony checks the same label and milestone filters between turns, during running-issue reconciliation, and before scheduling a successful continuation retry. All configured labels must still be present (case-insensitive); milestones match by title or number. Losing eligibility stops continuation and releases the claim without deleting the workspace. The issue and PR may remain open for human review; Symphony does not remove labels, close issues, or merge PRs on its own. Workflows without label or milestone filters retain their existing state-based behavior. Persisted retries are checked against current candidates before dispatch after a restart.
 
 ### Approval and Tool Policy
 

@@ -157,11 +157,31 @@ public sealed class IssueExecutionCoordinator(
             if (result.Success)
             {
                 finalStatus = RunStatusNames.Succeeded;
-                retryPlan = new RetryPlan(
-                    Attempt: 1,
-                    DueAtUtc: timeProvider.GetUtcNow().AddMilliseconds(1_000),
-                    DelayType: RetryDelayTypes.Continuation,
-                    Error: null);
+                var matchesFilters = true;
+                if (trackerQuery.Labels.Count > 0 || !string.IsNullOrWhiteSpace(trackerQuery.Milestone))
+                {
+                    var trackerClient = scope.ServiceProvider.GetRequiredService<ITrackerClient>();
+                    var snapshots = await trackerClient.FetchIssueStatesByIdsAsync(
+                        trackerQuery, [request.Issue.Id], cancellationToken);
+                    matchesFilters = snapshots.FirstOrDefault(state => state.Id == request.Issue.Id)
+                        ?.MatchesCandidateFilters ?? false;
+                }
+
+                if (!matchesFilters)
+                {
+                    releaseClaim = true;
+                    releaseStatus = RunStatusNames.Succeeded;
+                    await AppendEventAsync(dbContext, request, "continuation_stopped", LogLevel.Information,
+                        "Issue no longer matches the configured execution filters; continuation stopped.", cancellationToken);
+                }
+                else
+                {
+                    retryPlan = new RetryPlan(
+                        Attempt: 1,
+                        DueAtUtc: timeProvider.GetUtcNow().AddMilliseconds(1_000),
+                        DelayType: RetryDelayTypes.Continuation,
+                        Error: null);
+                }
             }
             else
             {
@@ -196,7 +216,7 @@ public sealed class IssueExecutionCoordinator(
                     break;
                 case RunStopReasons.Inactive:
                     finalStatus = RunStatusNames.CanceledByReconciliation;
-                    finalError = "issue is no longer active";
+                    finalError = "issue is no longer eligible for execution";
                     releaseClaim = true;
                     releaseStatus = RunStatusNames.CanceledByReconciliation;
                     cleanupWorkspace = false;

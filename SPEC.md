@@ -803,9 +803,16 @@ Part B: Tracker state refresh
 - Fetch current issue states for all running issue IDs.
 - For each running issue:
   - If tracker state is terminal: terminate worker and clean workspace.
-  - If tracker state is still active: update the in-memory issue snapshot.
+  - If tracker state is still active and candidate label/milestone filters match: update the in-memory issue snapshot.
+  - If candidate label/milestone filters no longer match: terminate worker without workspace cleanup or retry; release the claim. The issue may remain open for PR review.
   - If tracker state is neither active nor terminal: terminate worker without workspace cleanup.
 - If state refresh fails, keep workers running and try again on the next tick.
+
+The same candidate label/milestone filter check applies between live continuation turns and before
+scheduling a continuation retry after successful execution. All configured labels must match
+case-insensitively; milestones match by title or number, as during candidate dispatch. A successful
+run that no longer matches these filters releases its claim without a continuation retry. No tracker
+writes or PR merge are implied. Without label/milestone filters, existing state-based behavior remains.
 
 ### 8.6 Startup Terminal Workspace Cleanup
 
@@ -2007,6 +2014,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 - Candidate issue fetch uses active states with repository scope (`tracker.owner` + `tracker.repo`)
 - Optional candidate filtering by configured milestone is applied when `tracker.milestone` is set
+- Candidate label/milestone eligibility is returned with ID-based state refreshes, using the same matching rules as candidate dispatch
 - Empty `fetch_issues_by_states([])` returns empty without API call
 - Pagination preserves order across multiple pages
 - Pull request metadata is normalized when linked PRs are available
@@ -2027,6 +2035,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Terminal state stops running agent and cleans workspace
 - Reconciliation with no running issues is a no-op
 - Normal worker exit schedules a short continuation retry (attempt 1)
+- Loss of a configured execution label or milestone stops live continuation and running-issue reconciliation without workspace cleanup; successful filter-ineligible runs schedule no retry, and persisted retries cannot redispatch absent candidates
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error
