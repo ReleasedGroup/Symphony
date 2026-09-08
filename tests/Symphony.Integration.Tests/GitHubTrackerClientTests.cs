@@ -7,6 +7,34 @@ namespace Symphony.Integration.Tests;
 
 public sealed class GitHubTrackerClientTests
 {
+    [Theory]
+    [InlineData("symphony-test", "Sprint 1", true)]
+    [InlineData("SYMPHONY-TEST", "7", true)]
+    [InlineData("removed", "Sprint 1", false)]
+    [InlineData("symphony-test,missing", "Sprint 1", false)]
+    [InlineData("symphony-test", "Sprint 2", false)]
+    [InlineData("", null, true)]
+    [Trait("Spec", "17.3")]
+    public async Task FetchIssueStatesByIdsAsync_ShouldApplyCandidateLabelAndMilestoneSemantics(
+        string labels, string? milestone, bool expected)
+    {
+        const string payload = """
+            {"data":{"nodes":[{"id":"I_1","state":"OPEN",
+              "repository":{"name":"symphony","owner":{"login":"released"}},
+              "labels":{"nodes":[{"name":"symphony-test"}]},
+              "milestone":{"title":"Sprint 1","number":7}}]}}
+            """;
+        using var httpClient = new HttpClient(new StaticJsonHandler(payload));
+        var client = new GitHubTrackerClient(httpClient);
+        var query = new TrackerQuery("https://api.github.com/graphql", "token", "released", "symphony",
+            ["Open"], labels.Split(',', StringSplitOptions.RemoveEmptyEntries), milestone);
+
+        var snapshot = Assert.Single(await client.FetchIssueStatesByIdsAsync(query, ["I_1"]));
+
+        Assert.Equal("Open", snapshot.State);
+        Assert.Equal(expected, snapshot.MatchesCandidateFilters);
+    }
+
     [Fact]
     public async Task FetchCandidateIssuesAsync_ShouldApplyMilestoneAndLabelFilters()
     {

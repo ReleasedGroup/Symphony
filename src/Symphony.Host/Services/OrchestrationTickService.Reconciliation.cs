@@ -159,7 +159,7 @@ public sealed partial class OrchestrationTickService
                 continue;
             }
 
-            if (!IssueStateMatcher.MatchesConfiguredActiveState(refreshedState.State, workflowDefinition.Runtime.Tracker.ActiveStates))
+            if (!refreshedState.IsExecutionEligible(workflowDefinition.Runtime.Tracker.ActiveStates))
             {
                 await RequestRunStopAsync(
                     run,

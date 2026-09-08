@@ -62,6 +62,7 @@ Build the Symphony service from `SPEC.md` as a long-running orchestrator that:
 - Eligibility checks (state, blockers, retry due time, slot availability).
 - Dispatch ordering: priority then creation time.
 - Reconciliation loop for active runs.
+- Reuse candidate label/milestone eligibility during reconciliation and continuation; release filter-ineligible runs without retry or workspace cleanup (issue #62).
 - Retry queue with exponential backoff and cap.
 - Terminal completion handling aligned to issue `Closed` state.
 

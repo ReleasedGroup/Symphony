@@ -277,15 +277,19 @@ public sealed class CodexAgentRunnerTests
         Assert.Null(update.TotalTokens);
     }
 
-    [Fact]
-    public async Task RunIssueAsync_ShouldReuseThreadAcrossContinuationTurnsUntilIssueStopsBeingActive()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Spec", "17.5")]
+    public async Task RunIssueAsync_ShouldReuseThreadAcrossContinuationTurnsUntilIssueStopsBeingEligible(bool removeLabel)
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             return;
         }
 
-        var tracker = new SequencedTrackerClient(["Open", "Closed"]);
+        var tracker = new SequencedTrackerClient(removeLabel ? ["Open", "Open"] : ["Open", "Closed"],
+            filterResults: removeLabel ? [true, false] : null);
         var runner = CreateRunner(tracker);
         using var harness = CreateAppServerHarness(StandardCompletionScript());
 
@@ -297,7 +301,7 @@ public sealed class CodexAgentRunnerTests
                 harness.Command,
                 30_000,
                 maxTurns: 3,
-                trackerQuery: CreateTrackerQuery()));
+                trackerQuery: CreateTrackerQuery() with { Labels = removeLabel ? ["symphony-test"] : [] }));
 
         Assert.True(result.Success, result.Stderr);
         Assert.Equal(2, tracker.RefreshCount);
@@ -678,7 +682,8 @@ public sealed class CodexAgentRunnerTests
 
     private sealed class SequencedTrackerClient(
         IReadOnlyList<string> states,
-        GitHubGraphQlExecutionResult? graphQlResult = null) : ITrackerClient
+        GitHubGraphQlExecutionResult? graphQlResult = null,
+        IReadOnlyList<bool>? filterResults = null) : ITrackerClient
     {
         private readonly Queue<string> pendingStates = new(states);
         private readonly GitHubGraphQlExecutionResult configuredGraphQlResult =
@@ -696,7 +701,8 @@ public sealed class CodexAgentRunnerTests
         {
             RefreshCount++;
             var nextState = pendingStates.Count == 0 ? "Closed" : pendingStates.Dequeue();
-            return Task.FromResult<IReadOnlyList<IssueStateSnapshot>>([new IssueStateSnapshot(issueIds[0], nextState)]);
+            var matchesFilters = filterResults is null || filterResults[RefreshCount - 1];
+            return Task.FromResult<IReadOnlyList<IssueStateSnapshot>>([new IssueStateSnapshot(issueIds[0], nextState, matchesFilters)]);
         }
 
         public Task<GitHubGraphQlExecutionResult> ExecuteGitHubGraphQlAsync(TrackerQuery query, string graphQlDocument, string? variablesJson, CancellationToken cancellationToken = default)

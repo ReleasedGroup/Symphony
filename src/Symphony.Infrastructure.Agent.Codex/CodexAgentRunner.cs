@@ -359,10 +359,8 @@ public sealed partial class CodexAgentRunner(
                 }
 
                 var refreshedState = await RefreshIssueStateAsync(request, cancellationToken);
-                if (!string.IsNullOrWhiteSpace(refreshedState) &&
-                    !IssueStateMatcher.MatchesConfiguredActiveState(
-                        refreshedState,
-                        request.TrackerQuery?.ActiveStates ?? []))
+                if (refreshedState is not null &&
+                    !refreshedState.IsExecutionEligible(request.TrackerQuery?.ActiveStates ?? []))
                 {
                     break;
                 }
@@ -638,7 +636,7 @@ public sealed partial class CodexAgentRunner(
         await ReportUpdateAsync(onUpdate, update, cancellationToken);
     }
 
-    private async Task<string?> RefreshIssueStateAsync(
+    private async Task<IssueStateSnapshot?> RefreshIssueStateAsync(
         AgentRunRequest request,
         CancellationToken cancellationToken)
     {
@@ -654,7 +652,7 @@ public sealed partial class CodexAgentRunner(
                 [request.IssueId],
                 cancellationToken);
 
-            return refreshedStates.FirstOrDefault()?.State;
+            return refreshedStates.FirstOrDefault(state => state.Id == request.IssueId);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {

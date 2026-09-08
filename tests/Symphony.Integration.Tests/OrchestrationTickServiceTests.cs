@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Symphony.Core.Abstractions;
@@ -15,6 +17,135 @@ namespace Symphony.Integration.Tests;
 
 public sealed class OrchestrationTickServiceTests
 {
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, true)]
+    [InlineData(false, false, true)]
+    [InlineData(true, true, false, "Closed")]
+    [InlineData(true, true, false, "Backlog")]
+    [InlineData(true, true, true, "Open", true)]
+    [Trait("Spec", "17.4")]
+    public async Task Coordinator_ShouldOnlyScheduleSuccessfulContinuationWhileFiltersMatch(
+        bool configureLabels, bool matchesFilters, bool expectRetry, string refreshedState = "Open", bool refreshFails = false)
+    {
+        var root = Directory.CreateTempSubdirectory("symphony-continuation-").FullName;
+        try
+        {
+            var workflow = BuildWorkflowDefinition(1);
+            workflow = workflow with { Runtime = workflow.Runtime with
+            {
+                Tracker = workflow.Runtime.Tracker with { Labels = configureLabels ? ["symphony-test"] : [] },
+                Workspace = workflow.Runtime.Workspace with { Root = root }
+            } };
+            var builder = Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder();
+            builder.Services.AddDbContext<SymphonyDbContext>(options => options.UseSqlite($"Data Source={Path.Combine(root, "test.db")};Pooling=False"));
+            builder.Services.AddSingleton(TimeProvider.System);
+            builder.Services.AddScoped<IOrchestrationCoordinationStore, OrchestrationCoordinationStore>();
+            builder.Services.AddSingleton<ITrackerClient>(new FakeTrackerClient([], new Dictionary<string, string> { ["issue-1"] = refreshedState }, matchesFilters, refreshFails));
+            builder.Services.AddSingleton<IWorkspaceManager>(new PreparedWorkspaceManager(root));
+            builder.Services.AddSingleton<IWorkspaceHookRunner, NoOpHookRunner>();
+            builder.Services.AddSingleton<IWorkflowPromptRenderer, WorkflowPromptRenderer>();
+            builder.Services.AddSingleton<IAgentRunner, SuccessfulAgentRunner>();
+            builder.Services.AddSingleton<IssueExecutionCoordinator>();
+            using var host = builder.Build();
+            await using var scope = host.Services.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<SymphonyDbContext>();
+            await db.Database.EnsureCreatedAsync();
+            db.Runs.Add(new RunEntity { Id = "run-1", IssueId = "issue-1", IssueIdentifier = "#1", State = "Open", Status = RunStatusNames.Running });
+            db.RunAttempts.Add(new RunAttemptEntity { Id = "attempt-1", RunId = "run-1", IssueId = "issue-1", Status = RunStatusNames.Running });
+            db.DispatchClaims.Add(new DispatchClaimEntity { IssueId = "issue-1", IssueIdentifier = "#1", ClaimedByInstanceId = "instance-1" });
+            await db.SaveChangesAsync();
+            var coordinator = host.Services.GetRequiredService<IssueExecutionCoordinator>();
+            var request = new IssueExecutionRequest("run-1", "attempt-1", "instance-1", null, BuildIssue("issue-1", "#1", "Open", null), workflow);
+            // Await the complete lifecycle, including claim release, without polling the fire-and-forget entry point.
+            var execute = typeof(IssueExecutionCoordinator).GetMethod("ExecuteRunAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            using var cancellationSource = new CancellationTokenSource();
+            await (Task)execute.Invoke(coordinator, [request, cancellationSource])!;
+            db.ChangeTracker.Clear();
+
+            Assert.Equal(expectRetry ? 1 : 0, await db.RetryQueue.CountAsync());
+            if (expectRetry)
+            {
+                Assert.Equal(RetryDelayTypes.Continuation, (await db.RetryQueue.SingleAsync()).DelayType);
+            }
+            Assert.Equal(RunStatusNames.Succeeded, (await db.RunAttempts.SingleAsync()).Status);
+            var run = await db.Runs.SingleAsync();
+            Assert.Equal("Open", run.State);
+            Assert.Equal(expectRetry ? RunStatusNames.Retrying : RunStatusNames.Succeeded, run.Status);
+            if (!expectRetry)
+            {
+                Assert.NotNull((await db.DispatchClaims.SingleAsync()).ReleasedAtUtc);
+                Assert.True(await db.EventLog.AnyAsync(entry => entry.EventName == "continuation_stopped"));
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private sealed class PreparedWorkspaceManager(string root) : IWorkspaceManager
+    {
+        public Task<WorkspacePreparationResult> PrepareIssueWorkspaceAsync(WorkspacePreparationRequest request, CancellationToken cancellationToken = default)
+            => Task.FromResult(new WorkspacePreparationResult(root, "branch", false));
+        public Task<WorkspaceCleanupResult> CleanupIssueWorkspaceAsync(WorkspaceCleanupRequest request, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("An open issue's workspace must be retained.");
+    }
+
+    private sealed class NoOpHookRunner : IWorkspaceHookRunner
+    {
+        public Task RunHookAsync(WorkspaceHookRequest request, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class SuccessfulAgentRunner : IAgentRunner
+    {
+        public Task<AgentRunResult> RunIssueAsync(AgentRunRequest request, Func<AgentRunUpdate, CancellationToken, Task>? onUpdate = null, CancellationToken cancellationToken = default)
+            => Task.FromResult(new AgentRunResult(true, 0, "", "", TimeSpan.Zero));
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
+    public async Task RunTickAsync_ShouldStopOpenRunOutsideExecutionFiltersWithoutCleanup()
+    {
+        await using var harness = await TestHarness.CreateAsync(
+            BuildWorkflowDefinition(maxConcurrentAgents: 1),
+            tracker: new FakeTrackerClient([], new Dictionary<string, string> { ["issue-1"] = "Open" }, false),
+            coordinator: new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning, stopReturnsFalse: true));
+        await harness.InsertRunningRunAsync("issue-1", "#1", "Open", "instance-1");
+
+        await harness.Service.RunTickAsync(CancellationToken.None);
+
+        var run = await harness.DbContext.Runs.SingleAsync();
+        Assert.Equal("Open", run.State);
+        Assert.Equal(RunStatusNames.CanceledByReconciliation, run.Status);
+        Assert.Empty(harness.WorkspaceManager.CleanupRequests);
+        Assert.Empty(await harness.DbContext.RetryQueue.ToListAsync());
+        Assert.Empty(harness.Coordinator.StartRequests);
+        Assert.Equal(RunStatusNames.CanceledByReconciliation, (await harness.DbContext.DispatchClaims.SingleAsync()).Status);
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
+    public async Task RunTickAsync_ShouldReleasePersistedRetryOutsideExecutionFilters()
+    {
+        await using var harness = await TestHarness.CreateAsync(
+            BuildWorkflowDefinition(maxConcurrentAgents: 1),
+            tracker: new FakeTrackerClient([], new Dictionary<string, string> { ["issue-1"] = "Open" }, false),
+            coordinator: new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning));
+        await harness.InsertRetryingRunAsync("issue-1", "#1", "Open", "instance-1");
+        var retry = await harness.DbContext.RetryQueue.SingleAsync();
+        retry.DueAtUtc = DateTimeOffset.UtcNow.AddSeconds(-1);
+        await harness.DbContext.SaveChangesAsync();
+        harness.DbContext.ChangeTracker.Clear();
+
+        await harness.Service.RunTickAsync(CancellationToken.None);
+
+        Assert.Empty(await harness.DbContext.RetryQueue.ToListAsync());
+        Assert.Empty(harness.Coordinator.StartRequests);
+        Assert.Empty(harness.WorkspaceManager.CleanupRequests);
+        Assert.Equal("Open", (await harness.DbContext.Runs.SingleAsync()).State);
+    }
+
     [Fact]
     public async Task RunTickAsync_ShouldScheduleContinuationRetryAfterSuccessfulDispatch()
     {
@@ -594,7 +725,9 @@ public sealed class OrchestrationTickServiceTests
 
     private sealed class FakeTrackerClient(
         IReadOnlyList<NormalizedIssue> issues,
-        IReadOnlyDictionary<string, string>? issueStatesById = null) : IGitHubTrackerClient
+        IReadOnlyDictionary<string, string>? issueStatesById = null,
+        bool matchesCandidateFilters = true,
+        bool refreshFails = false) : IGitHubTrackerClient
     {
         private readonly Dictionary<string, string> statesById = issueStatesById is null
             ? new(StringComparer.OrdinalIgnoreCase)
@@ -613,9 +746,14 @@ public sealed class OrchestrationTickServiceTests
 
         public Task<IReadOnlyList<IssueStateSnapshot>> FetchIssueStatesByIdsAsync(TrackerQuery query, IReadOnlyList<string> issueIds, CancellationToken cancellationToken = default)
         {
+            if (refreshFails)
+            {
+                throw new HttpRequestException("Transient tracker failure");
+            }
+
             var snapshots = issueIds
                 .Where(id => statesById.ContainsKey(id))
-                .Select(id => new IssueStateSnapshot(id, statesById[id]))
+                .Select(id => new IssueStateSnapshot(id, statesById[id], matchesCandidateFilters))
                 .ToList();
             return Task.FromResult<IReadOnlyList<IssueStateSnapshot>>(snapshots);
         }
