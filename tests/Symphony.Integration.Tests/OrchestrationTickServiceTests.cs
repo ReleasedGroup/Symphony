@@ -17,6 +17,117 @@ namespace Symphony.Integration.Tests;
 
 public sealed class OrchestrationTickServiceTests
 {
+    [Fact]
+    [Trait("Spec", "17.4")]
+    public async Task CancellationAfterStart_ShouldKeepRunAndAttemptDurable()
+    {
+        using var cancellation = new CancellationTokenSource();
+        await using var harness = await TestHarness.CreateAsync(
+            BuildWorkflowDefinition(1),
+            new FakeTrackerClient([BuildIssue("issue-1", "#1", "Open", null)]),
+            new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning,
+                onStart: cancellation.Cancel));
+
+        await harness.Service.RunTickAsync(cancellation.Token);
+
+        var options = new DbContextOptionsBuilder<SymphonyDbContext>()
+            .UseSqlite(harness.DbContext.Database.GetConnectionString()).Options;
+        await using var freshContext = new SymphonyDbContext(options);
+        Assert.Equal(RunStatusNames.Running, (await freshContext.Runs.SingleAsync()).Status);
+        Assert.Equal(RunStatusNames.Running, (await freshContext.RunAttempts.SingleAsync()).Status);
+        Assert.Equal("active", (await freshContext.DispatchClaims.SingleAsync()).Status);
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
+    public async Task ManagedPause_ShouldSurviveRestartAndPreservePendingRetry()
+    {
+        var tracker = new FakeTrackerClient([BuildIssue("issue-1", "#1", "Open", null)]);
+        await using var harness = await TestHarness.CreateAsync(
+            BuildWorkflowDefinition(1), tracker,
+            new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning));
+        await harness.InsertRetryingRunAsync("issue-1", "#1", "Open", "instance-1");
+
+        var control = new ManagedControlService(harness.DbContext, TimeProvider.System);
+        Assert.True((await control.SetPausedAsync(true, CancellationToken.None)).Paused);
+        await harness.Service.RunTickAsync(CancellationToken.None);
+
+        Assert.False(tracker.FetchCandidateIssuesCalled);
+        Assert.Empty(harness.Coordinator.StartRequests);
+        Assert.Equal(1, await harness.DbContext.RetryQueue.CountAsync());
+
+        var options = new DbContextOptionsBuilder<SymphonyDbContext>()
+            .UseSqlite(harness.DbContext.Database.GetConnectionString())
+            .Options;
+        await using var restartedContext = new SymphonyDbContext(options);
+        var restartedControl = new ManagedControlService(restartedContext, TimeProvider.System);
+        var status = await restartedControl.GetStatusAsync(CancellationToken.None);
+        Assert.Equal("suspended", status.State);
+        Assert.Equal(1, status.PendingRetries);
+        Assert.True(status.Quiescent);
+
+        Assert.False((await restartedControl.SetPausedAsync(false, CancellationToken.None)).Paused);
+        await harness.Service.RunTickAsync(CancellationToken.None);
+        Assert.Single(harness.Coordinator.StartRequests);
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
+    public async Task Drain_ShouldReportTimeoutUntilActiveRunFinishes()
+    {
+        await using var harness = await TestHarness.CreateAsync(
+            BuildWorkflowDefinition(1), new FakeTrackerClient([]),
+            new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning));
+        await harness.InsertRunningRunAsync("issue-1", "#1", "Open", "instance-1");
+        var control = new ManagedControlService(harness.DbContext, TimeProvider.System);
+
+        var timedOut = await control.DrainAsync(TimeSpan.Zero, CancellationToken.None);
+        Assert.Equal("draining", timedOut.State);
+        Assert.Equal(1, timedOut.ActiveRuns);
+        Assert.False(timedOut.Quiescent);
+
+        var run = await harness.DbContext.Runs.SingleAsync();
+        run.Status = RunStatusNames.Succeeded;
+        await harness.DbContext.SaveChangesAsync();
+        var drained = await control.DrainAsync(TimeSpan.Zero, CancellationToken.None);
+        Assert.Equal("suspended", drained.State);
+        Assert.True(drained.Quiescent);
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
+    public async Task PauseDuringCandidateFetch_ShouldPreventNewDispatch()
+    {
+        var enteredFetch = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFetch = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tracker = new FakeTrackerClient(
+            [BuildIssue("issue-1", "#1", "Open", null)],
+            beforeReturnCandidates: async token =>
+            {
+                enteredFetch.SetResult();
+                await releaseFetch.Task.WaitAsync(token);
+            });
+        await using var harness = await TestHarness.CreateAsync(
+            BuildWorkflowDefinition(1), tracker,
+            new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning));
+
+        var tick = harness.Service.RunTickAsync(CancellationToken.None);
+        await enteredFetch.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var options = new DbContextOptionsBuilder<SymphonyDbContext>()
+            .UseSqlite(harness.DbContext.Database.GetConnectionString())
+            .Options;
+        await using (var concurrentContext = new SymphonyDbContext(options))
+        {
+            var control = new ManagedControlService(concurrentContext, TimeProvider.System);
+            Assert.True((await control.SetPausedAsync(true, CancellationToken.None)).Paused);
+        }
+
+        releaseFetch.SetResult();
+        await tick;
+        Assert.Empty(harness.Coordinator.StartRequests);
+        Assert.Equal(0, await harness.DbContext.Runs.CountAsync());
+    }
+
     [Theory]
     [InlineData(true, false, false)]
     [InlineData(true, true, true)]
@@ -535,6 +646,7 @@ public sealed class OrchestrationTickServiceTests
                 dbContext,
                 workspaceManager,
                 coordinator,
+                new ManagedControlService(dbContext, TimeProvider.System),
                 Options.Create(new OrchestrationOptions
                 {
                     InstanceId = "instance-1",
@@ -727,7 +839,8 @@ public sealed class OrchestrationTickServiceTests
         IReadOnlyList<NormalizedIssue> issues,
         IReadOnlyDictionary<string, string>? issueStatesById = null,
         bool matchesCandidateFilters = true,
-        bool refreshFails = false) : IGitHubTrackerClient
+        bool refreshFails = false,
+        Func<CancellationToken, Task>? beforeReturnCandidates = null) : IGitHubTrackerClient
     {
         private readonly Dictionary<string, string> statesById = issueStatesById is null
             ? new(StringComparer.OrdinalIgnoreCase)
@@ -735,10 +848,15 @@ public sealed class OrchestrationTickServiceTests
 
         public bool FetchCandidateIssuesCalled { get; private set; }
 
-        public Task<IReadOnlyList<NormalizedIssue>> FetchCandidateIssuesAsync(TrackerQuery query, CancellationToken cancellationToken = default)
+        public async Task<IReadOnlyList<NormalizedIssue>> FetchCandidateIssuesAsync(TrackerQuery query, CancellationToken cancellationToken = default)
         {
             FetchCandidateIssuesCalled = true;
-            return Task.FromResult(issues);
+            if (beforeReturnCandidates is not null)
+            {
+                await beforeReturnCandidates(cancellationToken);
+            }
+
+            return issues;
         }
 
         public Task<IReadOnlyList<NormalizedIssue>> FetchIssuesByStatesAsync(TrackerQuery query, IReadOnlyList<string> states, CancellationToken cancellationToken = default)
@@ -792,7 +910,8 @@ public sealed class OrchestrationTickServiceTests
     private sealed class FakeIssueExecutionCoordinator(
         FakeDispatchOutcome outcome,
         bool stopReturnsFalse = false,
-        bool observeStopStateWithFreshContext = false) : IIssueExecutionCoordinator
+        bool observeStopStateWithFreshContext = false,
+        Action? onStart = null) : IIssueExecutionCoordinator
     {
         private SymphonyDbContext? dbContext;
         private string? dbPath;
@@ -810,6 +929,7 @@ public sealed class OrchestrationTickServiceTests
         public async Task<bool> TryStartAsync(IssueExecutionRequest request, CancellationToken cancellationToken = default)
         {
             StartRequests.Add(request);
+            onStart?.Invoke();
             if (dbContext is null || outcome == FakeDispatchOutcome.LeaveRunning)
             {
                 return true;

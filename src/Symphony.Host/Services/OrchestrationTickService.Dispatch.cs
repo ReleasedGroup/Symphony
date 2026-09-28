@@ -135,6 +135,15 @@ public sealed partial class OrchestrationTickService
             return false;
         }
 
+        await using var dispatchGate = await managedControlService.TryEnterDispatchAsync(cancellationToken);
+        if (dispatchGate is null)
+        {
+            await coordinationStore.ReleaseIssueClaimAsync(
+                issue.Id, instanceId, "paused", cancellationToken);
+            logger.LogInformation("Dispatch denied for {IssueIdentifier} because managed pause is active.", issue.Identifier);
+            return false;
+        }
+
         var nowUtc = timeProvider.GetUtcNow();
         var run = await dbContext.Runs
             .Where(runEntity =>
@@ -204,26 +213,39 @@ public sealed partial class OrchestrationTickService
         });
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        // Commit run and attempt metadata before the coordinator can launch. A later
+        // cancellation must not roll back a run that has already started.
+        await dispatchGate.CommitAsync(cancellationToken);
 
-        var started = await issueExecutionCoordinator.TryStartAsync(
-            new IssueExecutionRequest(
-                run.Id,
-                runAttempt.Id,
-                instanceId,
-                attempt,
-                issue,
-                workflowDefinition),
-            cancellationToken);
+        // Recheck pause under a fresh write gate: it may have arrived between the
+        // durable commit and the actual start. Finish this phase despite tick cancellation.
+        await using var startGate = await managedControlService.TryEnterDispatchAsync(CancellationToken.None);
+        var started = false;
+        if (startGate is not null)
+        {
+            started = await issueExecutionCoordinator.TryStartAsync(
+                new IssueExecutionRequest(
+                    run.Id,
+                    runAttempt.Id,
+                    instanceId,
+                    attempt,
+                    issue,
+                    workflowDefinition),
+                CancellationToken.None);
+            await startGate.CommitAsync(CancellationToken.None);
+        }
 
         if (!started)
         {
             run.Status = RunStatusNames.Retrying;
             run.CurrentRetryAttempt = attempt.HasValue ? attempt.Value + 1 : 1;
             run.LastEvent = "dispatch_failed";
-            run.LastMessage = "Issue execution coordinator rejected the dispatch request.";
+            run.LastMessage = startGate is null
+                ? "Managed pause prevented execution after dispatch was reserved."
+                : "Issue execution coordinator rejected the dispatch request.";
             run.LastEventAtUtc = nowUtc;
             runAttempt.Status = RunStatusNames.Failed;
-            runAttempt.Error = "Issue execution coordinator rejected the dispatch request.";
+            runAttempt.Error = run.LastMessage;
             runAttempt.CompletedAtUtc = nowUtc;
 
             dbContext.RetryQueue.Add(new RetryQueueEntity
@@ -235,13 +257,13 @@ public sealed partial class OrchestrationTickService
                 Attempt = run.CurrentRetryAttempt.Value,
                 DueAtUtc = nowUtc.AddSeconds(10),
                 DelayType = RetryDelayTypes.Backoff,
-                Error = "failed to start issue execution coordinator",
+                Error = startGate is null ? "managed pause before execution" : "failed to start issue execution coordinator",
                 MaxBackoffMs = workflowDefinition.Runtime.Agent.MaxRetryBackoffMs,
                 CreatedAtUtc = nowUtc,
                 UpdatedAtUtc = nowUtc
             });
 
-            await dbContext.SaveChangesAsync(cancellationToken);
+            await dbContext.SaveChangesAsync(CancellationToken.None);
             return false;
         }
 

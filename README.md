@@ -15,6 +15,8 @@ Current scaffold includes:
   - `GET /api/v1/state`
   - `GET /api/v1/<issue_identifier>`
   - `POST /api/v1/refresh`
+  - `GET /api/v1/management/status`
+  - `POST /api/v1/management/pause`, `/drain`, `/resume`
 
 ## User Guide
 
@@ -33,6 +35,7 @@ Release bundle installation guidance is in [docs/PackageGuide.md](docs/PackageGu
 - Reconciliation refreshes issue states and execution-filter eligibility every tick, stops non-active, terminal, or filter-ineligible runs, cleans terminal workspaces for running and retrying issues, and reschedules stalled runs from the last Codex activity timestamp. Removing a configured execution label also stops live continuation turns and successful continuation retries while preserving the open issue, PR, and workspace.
 - Codex app-server sessions now support streamed multi-turn execution on a shared thread, permissive auto-approval, structured tool-call failures, and the `github_graphql` client-side tool.
 - Runtime state, tracked issue distribution, recent events, lease snapshots, token totals, and latest rate-limit payloads are available through the HTTP API and are derived from persisted orchestrator state. Token totals advance only from absolute Codex usage snapshots, not ordinary per-event `usage` maps.
+- Managed pause is stored in SQLite and blocks issue and retry dispatch across restarts. The management API reports active runs, pending retries, and whether a drain is quiescent.
 
 ## Build and Test
 

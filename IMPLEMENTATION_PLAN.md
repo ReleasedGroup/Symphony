@@ -197,6 +197,11 @@ Phase 8 - End-to-End Validation (3-4 days)
 
 ## Immediate Next Steps
 
+Managed backplane integration follows the existing v1 baseline in this order: persistent
+pause/drain/resume status (#64), epoch-bound dispatch fencing (#65), revisioned workflow
+editing (#66), and noninteractive provisioning (#67). Each contract requires SQLite and API
+integration tests before release.
+
 1. Scaffold solution and projects.
 2. Implement Phase 1 first (workflow/config) before external integrations.
 3. Implement multi-instance lease/claim persistence before enabling multi-node deployment.

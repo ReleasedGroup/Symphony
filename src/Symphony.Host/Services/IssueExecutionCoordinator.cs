@@ -20,6 +20,11 @@ public sealed class IssueExecutionCoordinator(
 
     public Task<bool> TryStartAsync(IssueExecutionRequest request, CancellationToken cancellationToken = default)
     {
+        if (applicationLifetime.ApplicationStopping.IsCancellationRequested || cancellationToken.IsCancellationRequested)
+        {
+            return Task.FromResult(false);
+        }
+
         var linkedSource = CancellationTokenSource.CreateLinkedTokenSource(
             applicationLifetime.ApplicationStopping,
             cancellationToken);
