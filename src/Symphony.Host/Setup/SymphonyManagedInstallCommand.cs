@@ -112,6 +112,10 @@ internal static partial class SymphonyManagedInstallCommand
         try
         {
             Directory.CreateDirectory(parent);
+            if (IsWithin(ResolvePhysicalPath(runtime.BundleRootPath), ResolvePhysicalPath(options.InstanceDirectory)))
+            {
+                throw new ManagedInstallException("directory_collision", "The instance directory resolves inside the package bundle.");
+            }
             Directory.CreateDirectory(staging);
             await CopyBundleAsync(runtime.BundleRootPath, staging, cancellationToken);
             var installedWorkflow = Path.Combine(staging, "WORKFLOW.md");
@@ -214,8 +218,8 @@ internal static partial class SymphonyManagedInstallCommand
         }
 
         var bundleRoot = Path.GetFullPath(runtime.BundleRootPath);
-        if (Directory.Exists(options.InstanceDirectory) ||
-            IsWithin(bundleRoot, options.InstanceDirectory))
+        if (Directory.Exists(options.InstanceDirectory) || File.Exists(options.InstanceDirectory) ||
+            IsWithin(ResolvePhysicalPath(bundleRoot), ResolvePhysicalPath(options.InstanceDirectory)))
         {
             return new Preflight(new ManagedInstallException("directory_collision", "The instance directory already exists or is inside the package bundle."));
         }
@@ -244,6 +248,12 @@ internal static partial class SymphonyManagedInstallCommand
         catch (JsonException)
         {
             return new Preflight(new ManagedInstallException("invalid_config", "Config source must be a JSON object."));
+        }
+
+        if (HasEndpointOverride(configuration))
+        {
+            return new Preflight(new ManagedInstallException("endpoint_override",
+                "Config source must not override the managed instance's loopback endpoint."));
         }
 
         try
@@ -319,6 +329,45 @@ internal static partial class SymphonyManagedInstallCommand
         var prefix = Path.GetFullPath(parent).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
         return Path.GetFullPath(candidate).StartsWith(prefix,
             OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+    }
+
+    private static string ResolvePhysicalPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath)!;
+        var resolved = root;
+        foreach (var segment in Path.GetRelativePath(root, fullPath)
+                     .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+        {
+            resolved = Path.Combine(resolved, segment);
+            if (Directory.Exists(resolved))
+            {
+                resolved = new DirectoryInfo(resolved).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? resolved;
+            }
+        }
+        return Path.GetFullPath(resolved);
+    }
+
+    private static bool HasEndpointOverride(JsonObject configuration)
+    {
+        foreach (var (key, value) in configuration)
+        {
+            if (key.Equals("urls", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("http_ports", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("https_ports", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("Kestrel:Endpoints", StringComparison.OrdinalIgnoreCase) ||
+                key.StartsWith("Kestrel:Endpoints:", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (key.Equals("Kestrel", StringComparison.OrdinalIgnoreCase) && value is JsonObject kestrel &&
+                kestrel.Any(item => item.Key.Equals("Endpoints", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static Task WriteResultAsync(TextWriter output, object result)

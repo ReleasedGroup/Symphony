@@ -124,9 +124,15 @@ public sealed class ManagedInstallTests
         var fixture = await Fixture.CreateAsync();
         try
         {
+            var secretName = $"SYMPHONY_MISSING_TOKEN_{Guid.NewGuid():N}";
+            await File.WriteAllTextAsync(fixture.WorkflowPath,
+                (await File.ReadAllTextAsync(fixture.WorkflowPath))
+                    .Replace("$SYMPHONY_GITHUB_TOKEN", "$" + secretName, StringComparison.Ordinal));
+            var arguments = (string[])fixture.Arguments.Clone();
+            arguments[^1] = secretName;
             var output = new StringWriter();
             var exit = await SymphonyManagedInstallCommand.RunAsync(
-                [.. fixture.Arguments, "--launch"], output, CancellationToken.None, fixture.Runtime);
+                [.. arguments, "--launch"], output, CancellationToken.None, fixture.Runtime);
             Assert.Equal(2, exit);
             Assert.Equal("secret_not_available", JsonDocument.Parse(output.ToString()).RootElement.GetProperty("code").GetString());
             Assert.False(Directory.Exists(fixture.Target));
@@ -134,11 +140,76 @@ public sealed class ManagedInstallTests
         finally { fixture.Dispose(); }
     }
 
+    [Fact]
+    public async Task ManagedInstall_ShouldRejectExistingFileTargetDuringPreflight()
+    {
+        var fixture = await Fixture.CreateAsync();
+        try
+        {
+            await File.WriteAllTextAsync(fixture.Target, "existing file");
+            var output = new StringWriter();
+            var exit = await SymphonyManagedInstallCommand.RunAsync(
+                fixture.Arguments, output, CancellationToken.None, fixture.Runtime);
+            Assert.Equal(2, exit);
+            Assert.Equal("directory_collision", JsonDocument.Parse(output.ToString()).RootElement.GetProperty("code").GetString());
+            Assert.Equal("existing file", await File.ReadAllTextAsync(fixture.Target));
+        }
+        finally { fixture.Dispose(); }
+    }
+
+    [Theory]
+    [InlineData("{\"Kestrel\":{\"Endpoints\":{\"Http\":{\"Url\":\"http://0.0.0.0:5000\"}}}}")]
+    [InlineData("{\"Kestrel:Endpoints:Http:Url\":\"http://0.0.0.0:5000\"}")]
+    [InlineData("{\"Urls\":\"http://0.0.0.0:5000\"}")]
+    public async Task ManagedInstall_ShouldRejectSourceEndpointOverrides(string configuration)
+    {
+        var fixture = await Fixture.CreateAsync();
+        try
+        {
+            await File.WriteAllTextAsync(fixture.ConfigPath, configuration);
+            var output = new StringWriter();
+            var exit = await SymphonyManagedInstallCommand.RunAsync(
+                fixture.Arguments, output, CancellationToken.None, fixture.Runtime);
+            Assert.Equal(2, exit);
+            Assert.Equal("endpoint_override", JsonDocument.Parse(output.ToString()).RootElement.GetProperty("code").GetString());
+            Assert.False(Directory.Exists(fixture.Target));
+        }
+        finally { fixture.Dispose(); }
+    }
+
+    [Fact]
+    public async Task ManagedInstall_ShouldRejectAliasIntoBundleBeforeStaging()
+    {
+        var fixture = await Fixture.CreateAsync();
+        try
+        {
+            var alias = Path.Combine(fixture.Root, "bundle-alias");
+            try { Directory.CreateSymbolicLink(alias, fixture.BundlePath); }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.ComponentModel.Win32Exception)
+            {
+                return;
+            }
+
+            var arguments = (string[])fixture.Arguments.Clone();
+            arguments[3] = Path.Combine(alias, "instance");
+            var output = new StringWriter();
+            var exit = await SymphonyManagedInstallCommand.RunAsync(
+                arguments, output, CancellationToken.None, fixture.Runtime);
+            Assert.Equal(2, exit);
+            Assert.Equal("directory_collision", JsonDocument.Parse(output.ToString()).RootElement.GetProperty("code").GetString());
+            Assert.False(Directory.Exists(Path.Combine(fixture.BundlePath, "instance")));
+        }
+        finally { fixture.Dispose(); }
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string _root;
+        public string Root => _root;
+        public string BundlePath => Runtime.BundleRootPath;
         public string Target { get; }
         public string WorkflowPath { get; }
+        public string ConfigPath { get; }
         public int Port { get; }
         public string[] Arguments { get; }
         public SymphonyInstallationRuntime Runtime { get; }
@@ -148,10 +219,11 @@ public sealed class ManagedInstallTests
             _root = root;
             Target = target;
             WorkflowPath = workflowPath;
+            ConfigPath = Path.Combine(root, "source", "config.json");
             Port = port;
             Runtime = runtime;
             Arguments = ["--instance-id", "fixed-device-01", "--instance-dir", target,
-                "--workflow-path", workflowPath, "--config-path", Path.Combine(root, "source", "config.json"),
+                "--workflow-path", workflowPath, "--config-path", ConfigPath,
                 "--port", port.ToString(), "--github-token-env", "SYMPHONY_GITHUB_TOKEN"];
         }
 

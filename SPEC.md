@@ -2101,7 +2101,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - If managed installation is implemented, it accepts explicit instance identity, source
   workflow/config paths, loopback port, and a token environment reference without prompts;
   returns machine-readable preflight/install results; rejects directory and port collisions;
-  preserves existing instances; and launches only on explicit request
+  rejects aliases into the package bundle and source endpoint overrides; preserves existing
+  instances; and launches only on explicit request
 
 ### 17.8 Real Integration Profile (Recommended)
 
