@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -11,6 +12,75 @@ namespace Symphony.Integration.Tests;
 public sealed class CodexAgentRunnerTests
 {
     private const int AppServerHarnessReadTimeoutMs = 60_000;
+
+    [Fact]
+    [Trait("Spec", "17.5")]
+    public async Task RunIssueAsync_CancellationShouldKillProcessTreePromptly()
+    {
+        var workspace = Directory.CreateTempSubdirectory("symphony-cancel-");
+        var runner = CreateRunner();
+        var started = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var childPidPath = Path.Combine(workspace.FullName, "child.pid");
+        var command = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? "powershell -NoProfile -Command \"Set-Content -Path child.pid -Value $PID; Start-Sleep -Seconds 30\""
+            : "sh -c 'echo $$ > child.pid; sleep 30'";
+        using var cancellation = new CancellationTokenSource();
+        try
+        {
+            var run = runner.RunIssueAsync(
+                CreateRequest("id-cancel", "#cancel", workspace.FullName, command, 30_000),
+                (update, _) =>
+                {
+                    if (update.EventType == "process_started" && update.CodexAppServerPid.HasValue)
+                    {
+                        started.TrySetResult(update.CodexAppServerPid.Value);
+                    }
+
+                    return Task.CompletedTask;
+                },
+                cancellation.Token);
+            var processId = await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(SpinWait.SpinUntil(() => File.Exists(childPidPath), TimeSpan.FromSeconds(15)));
+            var childProcessId = int.Parse(File.ReadAllText(childPidPath).Trim());
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+            foreach (var id in new[] { processId, childProcessId })
+            {
+                Assert.True(SpinWait.SpinUntil(() =>
+                {
+                    try
+                    {
+                        using var process = Process.GetProcessById(id);
+                        return process.HasExited;
+                    }
+                    catch (ArgumentException)
+                    {
+                        return true;
+                    }
+                }, TimeSpan.FromSeconds(5)));
+            }
+        }
+        finally
+        {
+            SpinWait.SpinUntil(() =>
+            {
+                if (!Directory.Exists(workspace.FullName))
+                {
+                    return true;
+                }
+
+                try
+                {
+                    workspace.Delete(recursive: true);
+                    return true;
+                }
+                catch (IOException)
+                {
+                    return false;
+                }
+            }, TimeSpan.FromSeconds(5));
+        }
+    }
 
     [Fact]
     public async Task RunIssueAsync_ShouldUsePropertyParameterNamesForValidationErrors()

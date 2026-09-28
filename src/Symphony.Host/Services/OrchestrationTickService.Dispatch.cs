@@ -140,7 +140,7 @@ public sealed partial class OrchestrationTickService
         {
             await coordinationStore.ReleaseIssueClaimAsync(
                 issue.Id, instanceId, "paused", cancellationToken);
-            logger.LogInformation("Dispatch denied for {IssueIdentifier} because managed pause is active.", issue.Identifier);
+            logger.LogInformation("Managed dispatch denied for {IssueIdentifier} by the dispatch gate.", issue.Identifier);
             return false;
         }
 
@@ -217,8 +217,9 @@ public sealed partial class OrchestrationTickService
         // cancellation must not roll back a run that has already started.
         await dispatchGate.CommitAsync(cancellationToken);
 
-        // Recheck pause under a fresh write gate: it may have arrived between the
-        // durable commit and the actual start. Finish this phase despite tick cancellation.
+        // Recheck pause and the persisted lease under a fresh write gate. Keep
+        // the gate through TryStartAsync so an external epoch update cannot
+        // commit between the lease check and the coordinator start.
         await using var startGate = await managedControlService.TryEnterDispatchAsync(CancellationToken.None);
         var started = false;
         if (startGate is not null)

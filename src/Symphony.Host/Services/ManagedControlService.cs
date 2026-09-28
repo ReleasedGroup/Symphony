@@ -11,12 +11,24 @@ public sealed record ManagementStatus(
     int ActiveRuns,
     int PendingRetries,
     bool Quiescent,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    long? CurrentEpoch,
+    DateTimeOffset? LeaseExpiresAtUtc,
+    string? DispatchDeniedReason);
+
+public sealed class ManagedLeaseDeniedException(string reason) : Exception(reason)
+{
+    public string Reason { get; } = reason;
+}
 
 public sealed class ManagedControlService(
     SymphonyDbContext dbContext,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    ManagedLeaseService managedLeaseService)
 {
+    public Task<ManagedLeaseDecision> GetDispatchDecisionAsync(CancellationToken cancellationToken)
+        => managedLeaseService.GetDispatchDecisionAsync(cancellationToken);
+
     public async Task<bool> IsPausedAsync(CancellationToken cancellationToken)
         => await dbContext.ManagementControl
             .AsNoTracking()
@@ -35,6 +47,11 @@ public sealed class ManagedControlService(
         var pendingRetries = await dbContext.RetryQueue
             .AsNoTracking()
             .CountAsync(cancellationToken);
+        var leaseDecision = await managedLeaseService.GetDispatchDecisionAsync(cancellationToken);
+        var persistedLease = managedLeaseService.IsEnabled
+            ? await dbContext.ManagedLease.AsNoTracking()
+                .SingleAsync(item => item.Id == 1, cancellationToken)
+            : null;
         var quiescent = control.Paused && activeRuns == 0;
         return new ManagementStatus(
             control.Paused ? (quiescent ? "suspended" : "draining") : "running",
@@ -42,11 +59,25 @@ public sealed class ManagedControlService(
             activeRuns,
             pendingRetries,
             quiescent,
-            control.UpdatedAtUtc);
+            control.UpdatedAtUtc,
+            persistedLease is null
+                ? leaseDecision.Epoch
+                : persistedLease.CurrentEpoch > 0 ? persistedLease.CurrentEpoch : null,
+            persistedLease is null ? leaseDecision.ExpiresAtUtc : persistedLease.ExpiresAtUtc,
+            leaseDecision.DeniedReason);
     }
 
     public async Task<ManagementStatus> SetPausedAsync(bool paused, CancellationToken cancellationToken)
     {
+        if (!paused)
+        {
+            var leaseDecision = await managedLeaseService.GetDispatchDecisionAsync(cancellationToken);
+            if (!leaseDecision.Allowed)
+            {
+                throw new ManagedLeaseDeniedException(leaseDecision.DeniedReason ?? "lease_required");
+            }
+        }
+
         await dbContext.ManagementControl
             .Where(control => control.Id == 1 && control.Paused != paused)
             .ExecuteUpdateAsync(setters => setters
@@ -76,8 +107,8 @@ public sealed class ManagedControlService(
         return status;
     }
 
-    // SQLite's write transaction serializes a dispatch start with a pause update.
-    // Once pause returns, no later dispatch can have passed this gate.
+    // SQLite's write transaction serializes a dispatch start with pause and
+    // persisted epoch updates. The caller holds this gate through TryStartAsync.
     public async Task<IDbContextTransaction?> TryEnterDispatchAsync(CancellationToken cancellationToken)
     {
         var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
@@ -86,6 +117,14 @@ public sealed class ManagedControlService(
             await dbContext.Database.ExecuteSqlRawAsync(
                 "UPDATE management_control SET Id = Id WHERE Id = 1", cancellationToken);
             if (await IsPausedAsync(cancellationToken))
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                await transaction.DisposeAsync();
+                return null;
+            }
+
+            var leaseDecision = await managedLeaseService.GetDispatchDecisionAsync(cancellationToken);
+            if (!leaseDecision.Allowed)
             {
                 await transaction.RollbackAsync(cancellationToken);
                 await transaction.DisposeAsync();

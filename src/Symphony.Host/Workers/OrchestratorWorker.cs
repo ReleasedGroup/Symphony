@@ -13,12 +13,13 @@ public sealed class OrchestratorWorker(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("Orchestrator worker started.");
+        var startupCleanupPending = true;
 
         try
         {
             await using var startupScope = serviceScopeFactory.CreateAsyncScope();
             var startupTickService = startupScope.ServiceProvider.GetRequiredService<OrchestrationTickService>();
-            await startupTickService.RunStartupCleanupAsync(stoppingToken);
+            startupCleanupPending = !await startupTickService.RunStartupCleanupAsync(stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -37,6 +38,11 @@ public sealed class OrchestratorWorker(
             {
                 await using var scope = serviceScopeFactory.CreateAsyncScope();
                 var tickService = scope.ServiceProvider.GetRequiredService<OrchestrationTickService>();
+                if (startupCleanupPending)
+                {
+                    startupCleanupPending = !await tickService.RunStartupCleanupAsync(stoppingToken);
+                }
+
                 var workflowPollIntervalMs = await tickService.RunTickAsync(stoppingToken);
                 if (workflowPollIntervalMs is > 0)
                 {

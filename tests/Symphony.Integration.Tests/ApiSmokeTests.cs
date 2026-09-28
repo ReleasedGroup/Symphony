@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.TestHost;
@@ -9,6 +11,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Symphony.Core.Abstractions;
 using Symphony.Core.Models;
 using Symphony.Host;
+using Symphony.Host.Services;
 using Symphony.Infrastructure.Persistence.Sqlite;
 using Symphony.Infrastructure.Persistence.Sqlite.Entities;
 using Symphony.Infrastructure.Tracker.GitHub;
@@ -18,6 +21,76 @@ namespace Symphony.Integration.Tests;
 
 public sealed class ApiSmokeTests
 {
+    [Fact]
+    [Trait("Spec", "17.4")]
+    public async Task ManagedLeaseEndpoint_ShouldRequireSignedCurrentEpochForResume()
+    {
+        var workflowPath = CreateValidWorkflowPath();
+        var dbPath = Path.Combine(Path.GetTempPath(), $"symphony-int-{Guid.NewGuid():N}.db");
+        var keyName = $"SYMPHONY_API_LEASE_{Guid.NewGuid():N}";
+        var key = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        Environment.SetEnvironmentVariable(keyName, key);
+        var stderr = new StringWriter();
+        try
+        {
+            var exitCode = await SymphonyHostApplication.RunCliAsync(
+                [workflowPath], stderr,
+                configureBuilder: builder =>
+                {
+                    ConfigureTestServer(builder, dbPath);
+                    builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["ManagedLease:Enabled"] = "true",
+                        ["ManagedLease:InstanceId"] = "logical-1",
+                        ["ManagedLease:GenerationId"] = "generation-1",
+                        ["ManagedLease:SigningKeyReference"] = $"${keyName}",
+                        ["ManagedLease:MaxClockSkewSeconds"] = "0"
+                    });
+                },
+                configureServices: services => RegisterFakeTracker(services),
+                runApplicationAsync: async (app, cancellationToken) =>
+                {
+                    await app.StartAsync(cancellationToken);
+                    using var client = app.GetTestClient();
+                    var denied = await client.PostAsync("/api/v1/management/resume", null, cancellationToken);
+                    Assert.Equal(HttpStatusCode.Conflict, denied.StatusCode);
+                    Assert.Contains("lease_required",
+                        await denied.Content.ReadAsStringAsync(cancellationToken), StringComparison.Ordinal);
+
+                    var issued = DateTimeOffset.UtcNow;
+                    var expiry = issued.AddSeconds(30);
+                    var payload = $"logical-1\ngeneration-1\n1\n{issued.ToUnixTimeMilliseconds()}\n{expiry.ToUnixTimeMilliseconds()}";
+                    var signature = Convert.ToBase64String(HMACSHA256.HashData(
+                        Encoding.UTF8.GetBytes(key), Encoding.UTF8.GetBytes(payload)));
+                    var lease = new ManagedLeaseRequest(
+                        "logical-1", "generation-1", 1, issued, expiry, signature);
+                    var invalid = await client.PutAsJsonAsync("/api/v1/management/lease",
+                        lease with { Signature = "bad" }, cancellationToken);
+                    Assert.Equal(HttpStatusCode.Forbidden, invalid.StatusCode);
+                    var accepted = await client.PutAsJsonAsync(
+                        "/api/v1/management/lease", lease, cancellationToken);
+                    Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+
+                    var resumed = await client.PostAsync("/api/v1/management/resume", null, cancellationToken);
+                    Assert.Equal(HttpStatusCode.OK, resumed.StatusCode);
+                    using var status = JsonDocument.Parse(await client.GetStringAsync(
+                        "/api/v1/management/status", cancellationToken));
+                    Assert.Equal(1, status.RootElement.GetProperty("currentEpoch").GetInt64());
+                    Assert.Equal(JsonValueKind.Null,
+                        status.RootElement.GetProperty("dispatchDeniedReason").ValueKind);
+                    await app.StopAsync(cancellationToken);
+                });
+            Assert.True(exitCode == 0, stderr.ToString());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(keyName, null);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            TryDeleteFile(dbPath);
+            TryDeleteFile(workflowPath);
+        }
+    }
+
     [Fact]
     [Trait("Spec", "17.4")]
     public async Task ManagementEndpoints_ShouldPauseDrainAndResumeWithStableResponses()

@@ -1585,6 +1585,31 @@ code `invalid_drain_timeout`. Resume clears pause and requests an immediate refr
 These controls are intended for a device-local supervisor over loopback. The host API has no
 authentication and must not be exposed directly to a network.
 
+### 13.9 Managed Dispatch Lease
+
+Managed mode is opt-in through `ManagedLease:Enabled`. It requires stable `InstanceId` and
+`GenerationId`, plus `SigningKeyReference` as an `$ENV_VAR` reference to a secret with at least
+32 characters. Defaults are a 60-second maximum signed lease and 5 seconds of clock skew.
+The issuing backplane signs UTF-8 text containing instance ID, generation ID, epoch, issued
+Unix milliseconds, and expiry Unix milliseconds, separated by newlines, with HMAC-SHA256.
+`PUT /api/v1/management/lease` accepts those fields and a base64 signature. It rejects bad
+identity, signature, time window, and stale epoch with stable error codes. Repeating a valid
+renewal is idempotent; a higher epoch cancels work bound to the old epoch.
+
+On startup, a persisted lease is observable but dispatch remains denied until a fresh valid
+renewal establishes a monotonic in-process deadline. Each tick and each individual dispatch
+start checks pause, the current signed lease, and the epoch persisted in SQLite. Expiry or
+epoch mismatch denies new work and cancels active runs. Cancellation kills the Codex process
+tree; it is initiated no later than the signed expiry minus the configured skew allowance.
+An external epoch update in a shared SQLite database is detected by a 250 ms monitor. The
+status API reports the current epoch, expiry, and dispatch-denied reason. Resume requires a
+current lease in managed mode.
+
+The backplane is the exclusive lease issuer for each execution scope. It must not issue a
+lease to a replacement generation while a prior generation can still dispatch; it waits for
+the prior lease to expire or verifies that generation is fenced. Independent local SQLite
+databases cannot establish this cross-device exclusivity themselves.
+
 ## 14. Failure Model and Recovery Strategy
 
 ### 14.1 Failure Classes
@@ -2058,6 +2083,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Pause during candidate fetch or dispatch cannot start work after pause acknowledgement
 - Drain timeout reports `draining`; quiescence is reported only after active runs finish
 - Resume is idempotent and permits pending retry dispatch on the next tick
+- Managed mode rejects unsigned, stale, wrong-generation, expired, and clock-skewed renewals
+- Managed startup requires a fresh renewal; expiry cancels work without a network call or poll tick
+- Two independent SQLite installations dispatch only for the generation holding an unexpired
+  centrally issued lease, and epoch advancement cancels the prior run token
 - Dispatch sort order is priority then oldest creation time
 - `Todo` issue with non-terminal blockers is not eligible
 - `Todo` issue with terminal blockers is eligible
