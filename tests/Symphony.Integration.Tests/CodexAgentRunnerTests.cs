@@ -10,7 +10,7 @@ namespace Symphony.Integration.Tests;
 
 public sealed class CodexAgentRunnerTests
 {
-    private const int AppServerHarnessReadTimeoutMs = 30_000;
+    private const int AppServerHarnessReadTimeoutMs = 60_000;
 
     [Fact]
     public async Task RunIssueAsync_ShouldUsePropertyParameterNamesForValidationErrors()

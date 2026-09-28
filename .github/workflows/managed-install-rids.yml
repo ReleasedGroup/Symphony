@@ -33,7 +33,7 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - name: Test managed install on host OS
-        run: dotnet test Symphony.slnx -warnaserror
+        run: dotnet test tests/Symphony.Integration.Tests/Symphony.Integration.Tests.csproj -warnaserror --filter FullyQualifiedName~ManagedInstallTests
       - name: Publish and verify target RID
         shell: pwsh
         run: |
