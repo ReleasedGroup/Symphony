@@ -71,6 +71,86 @@ public sealed class ManagedLeaseTests
 
     [Fact]
     [Trait("Spec", "17.4")]
+    public async Task FutureIssuedLeaseWithinSkew_ShouldKeepLocalDeadlineUntilExpiryMinusSkew()
+    {
+        var clock = new AdjustableTimeProvider(DateTimeOffset.UtcNow);
+        await using var harness = await LeaseHarness.CreateAsync(
+            "instance-1", "generation-1", clock);
+        var now = clock.GetUtcNow();
+        var lease = harness.Sign(1, now.AddSeconds(5), now.AddSeconds(6));
+
+        Assert.True((await harness.Service.RenewAsync(lease, CancellationToken.None)).Accepted);
+        Assert.True((await harness.Service.GetDispatchDecisionAsync(CancellationToken.None)).Allowed);
+        Assert.False(harness.Runtime.GetRunCancellationToken().IsCancellationRequested);
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal("lease_expired", harness.Runtime.GetLocalDecision().DeniedReason);
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
+    public async Task Status_ShouldReportPersistedEpochAfterExternalAdvance()
+    {
+        await using var harness = await LeaseHarness.CreateAsync("instance-1", "generation-1");
+        var now = harness.TimeProvider.GetUtcNow();
+        Assert.True((await harness.Service.RenewAsync(
+            harness.Sign(1, now, now.AddSeconds(30)), CancellationToken.None)).Accepted);
+        var newExpiry = now.AddSeconds(45);
+
+        var dbOptions = new DbContextOptionsBuilder<SymphonyDbContext>()
+            .UseSqlite(harness.DbContext.Database.GetConnectionString()).Options;
+        await using (var externalContext = new SymphonyDbContext(dbOptions))
+        {
+            await externalContext.ManagedLease.ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.CurrentEpoch, 2)
+                .SetProperty(item => item.ExpiresAtUtc, newExpiry));
+        }
+
+        var control = new ManagedControlService(harness.DbContext, harness.TimeProvider, harness.Service);
+        var status = await control.GetStatusAsync(CancellationToken.None);
+        Assert.Equal(2, status.CurrentEpoch);
+        Assert.Equal(newExpiry, status.LeaseExpiresAtUtc);
+        Assert.Equal("lease_epoch_mismatch", status.DispatchDeniedReason);
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
+    public async Task DispatchStartGate_ShouldSerializeExternalEpochAdvance()
+    {
+        await using var harness = await LeaseHarness.CreateAsync("instance-1", "generation-1");
+        var now = harness.TimeProvider.GetUtcNow();
+        Assert.True((await harness.Service.RenewAsync(
+            harness.Sign(1, now, now.AddSeconds(30)), CancellationToken.None)).Accepted);
+        var control = new ManagedControlService(harness.DbContext, harness.TimeProvider, harness.Service);
+        var writerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task epochWrite;
+
+        await using (var startGate = await control.TryEnterDispatchAsync(CancellationToken.None))
+        {
+            Assert.NotNull(startGate);
+            var dbOptions = new DbContextOptionsBuilder<SymphonyDbContext>()
+                .UseSqlite(harness.DbContext.Database.GetConnectionString()).Options;
+            epochWrite = Task.Run(async () =>
+            {
+                await using var externalContext = new SymphonyDbContext(dbOptions);
+                writerStarted.SetResult();
+                await externalContext.ManagedLease.ExecuteUpdateAsync(setters =>
+                    setters.SetProperty(item => item.CurrentEpoch, 2));
+            });
+
+            await writerStarted.Task;
+            Assert.NotSame(epochWrite, await Task.WhenAny(epochWrite, Task.Delay(100)));
+            Assert.True((await harness.Service.GetDispatchDecisionAsync(CancellationToken.None)).Allowed);
+            await startGate.CommitAsync(CancellationToken.None);
+        }
+
+        await epochWrite.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal("lease_epoch_mismatch",
+            (await harness.Service.GetDispatchDecisionAsync(CancellationToken.None)).DeniedReason);
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
     public async Task Restart_ShouldRequireFreshRenewalOfPersistedLease()
     {
         await using var harness = await LeaseHarness.CreateAsync("instance-1", "generation-1");

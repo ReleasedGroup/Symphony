@@ -87,6 +87,33 @@ public sealed class OrchestrationTickServiceTests
 
     [Fact]
     [Trait("Spec", "17.4")]
+    public async Task ManagedTickWithoutLease_ShouldLeaveOrphanedStateAndWorkflowSnapshotUntouched()
+    {
+        var managed = new ManagedLeaseOptions
+        {
+            Enabled = true,
+            InstanceId = "logical-1",
+            GenerationId = "generation-1"
+        };
+        var tracker = new FakeTrackerClient([]);
+        await using var harness = await TestHarness.CreateAsync(
+            BuildWorkflowDefinition(1), tracker,
+            new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning), managed);
+        await harness.InsertRunningRunAsync("orphan-1", "#9", "Open", "previous-instance");
+
+        await harness.Service.RunStartupCleanupAsync(CancellationToken.None);
+        await harness.Service.RunTickAsync(CancellationToken.None);
+
+        Assert.False(tracker.FetchCandidateIssuesCalled);
+        Assert.Empty(harness.DbContext.WorkflowSnapshots);
+        Assert.Equal("previous-instance", (await harness.DbContext.Runs.SingleAsync()).OwnerInstanceId);
+        Assert.Equal(RunStatusNames.Running, (await harness.DbContext.Runs.SingleAsync()).Status);
+        Assert.Equal("previous-instance", (await harness.DbContext.DispatchClaims.SingleAsync()).ClaimedByInstanceId);
+        Assert.Empty(harness.DbContext.RetryQueue);
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
     public async Task ManagedPause_ShouldSurviveRestartAndPreservePendingRetry()
     {
         var tracker = new FakeTrackerClient([BuildIssue("issue-1", "#1", "Open", null)]);

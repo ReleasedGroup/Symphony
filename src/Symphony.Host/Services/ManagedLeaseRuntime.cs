@@ -85,11 +85,10 @@ public sealed class ManagedLeaseRuntime(
         }
     }
 
-    public void Apply(long newEpoch, DateTimeOffset issuedAtUtc, DateTimeOffset newExpiryUtc)
+    public void Apply(long newEpoch, DateTimeOffset newExpiryUtc)
     {
         var nowUtc = timeProvider.GetUtcNow();
-        var referenceTime = nowUtc > issuedAtUtc ? nowUtc : issuedAtUtc;
-        var remaining = newExpiryUtc - referenceTime -
+        var remaining = newExpiryUtc - nowUtc -
             TimeSpan.FromSeconds(managedOptions.Value.MaxClockSkewSeconds);
         if (remaining <= TimeSpan.Zero)
         {

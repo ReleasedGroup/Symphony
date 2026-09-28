@@ -60,8 +60,10 @@ public sealed class ManagedControlService(
             pendingRetries,
             quiescent,
             control.UpdatedAtUtc,
-            leaseDecision.Epoch ?? (persistedLease?.CurrentEpoch > 0 ? persistedLease.CurrentEpoch : null),
-            leaseDecision.ExpiresAtUtc ?? persistedLease?.ExpiresAtUtc,
+            persistedLease is null
+                ? leaseDecision.Epoch
+                : persistedLease.CurrentEpoch > 0 ? persistedLease.CurrentEpoch : null,
+            persistedLease is null ? leaseDecision.ExpiresAtUtc : persistedLease.ExpiresAtUtc,
             leaseDecision.DeniedReason);
     }
 
@@ -105,8 +107,8 @@ public sealed class ManagedControlService(
         return status;
     }
 
-    // SQLite's write transaction serializes a dispatch start with a pause update.
-    // Once pause returns, no later dispatch can have passed this gate.
+    // SQLite's write transaction serializes a dispatch start with pause and
+    // persisted epoch updates. The caller holds this gate through TryStartAsync.
     public async Task<IDbContextTransaction?> TryEnterDispatchAsync(CancellationToken cancellationToken)
     {
         var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);

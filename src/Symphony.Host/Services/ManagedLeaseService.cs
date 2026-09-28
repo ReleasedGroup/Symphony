@@ -104,7 +104,7 @@ public sealed class ManagedLeaseService(
         await dbContext.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
 
-        runtime.Apply(request.Epoch, request.IssuedAtUtc, request.ExpiresAtUtc);
+        runtime.Apply(request.Epoch, request.ExpiresAtUtc);
         return new ManagedLeaseRenewalResult(true, null, runtime.GetLocalDecision());
     }
 

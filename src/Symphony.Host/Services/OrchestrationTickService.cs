@@ -50,6 +50,14 @@ public sealed partial class OrchestrationTickService
     public async Task RunStartupCleanupAsync(CancellationToken cancellationToken)
     {
         var workflowDefinition = await workflowDefinitionProvider.GetCurrentAsync(cancellationToken);
+        var startupLeaseDecision = await managedControlService.GetDispatchDecisionAsync(cancellationToken);
+        if (!startupLeaseDecision.Allowed)
+        {
+            logger.LogWarning("Skipping startup cleanup: managed lease denied. Reason={DeniedReason} Epoch={Epoch}",
+                startupLeaseDecision.DeniedReason, startupLeaseDecision.Epoch);
+            return;
+        }
+
         await PersistWorkflowSnapshotAsync(workflowDefinition, cancellationToken);
 
         string apiKey;
@@ -96,6 +104,14 @@ public sealed partial class OrchestrationTickService
     public async Task<int?> RunTickAsync(CancellationToken cancellationToken)
     {
         var workflowDefinition = await workflowDefinitionProvider.GetCurrentAsync(cancellationToken);
+        var tickLeaseDecision = await managedControlService.GetDispatchDecisionAsync(cancellationToken);
+        if (!tickLeaseDecision.Allowed)
+        {
+            logger.LogWarning("Skipping tick: managed lease denied. Reason={DeniedReason} Epoch={Epoch}",
+                tickLeaseDecision.DeniedReason, tickLeaseDecision.Epoch);
+            return workflowDefinition.Runtime.Polling.IntervalMs;
+        }
+
         await PersistWorkflowSnapshotAsync(workflowDefinition, cancellationToken);
 
         string? apiKey = null;
