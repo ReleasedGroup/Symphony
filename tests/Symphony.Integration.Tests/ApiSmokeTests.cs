@@ -806,6 +806,61 @@ public sealed class ApiSmokeTests
     }
 
     [Fact]
+    public async Task WorkflowEndpoint_ShouldValidateAndReturnTypedConflictWithoutExposingSecrets()
+    {
+        const string secret = "private-inline-api-key";
+        var workflowPath = CreateWorkflowPath("---\ntracker:\n  kind: github\n  api_key: " + secret + "\n  owner: released\n  repo: symphony\n---\nPrompt A\n");
+        var dbPath = Path.Combine(Path.GetTempPath(), $"symphony-int-{Guid.NewGuid():N}.db");
+        var stderr = new StringWriter();
+        try
+        {
+            var exitCode = await SymphonyHostApplication.RunCliAsync(
+                [workflowPath], stderr,
+                configureBuilder: builder => ConfigureTestServer(builder, dbPath),
+                configureServices: services => RegisterFakeTracker(services),
+                runApplicationAsync: async (app, cancellationToken) =>
+                {
+                    await app.StartAsync(cancellationToken);
+                    using var client = app.GetTestClient();
+                    var original = await client.GetFromJsonAsync<WorkflowEditorDocument>("/api/v1/workflow", cancellationToken);
+                    Assert.NotNull(original);
+                    Assert.False(string.IsNullOrWhiteSpace(original!.ContentRevision));
+                    Assert.Equal(original.ContentRevision, original.EffectiveLoadedRevision);
+                    Assert.DoesNotContain(secret, JsonSerializer.Serialize(original), StringComparison.Ordinal);
+
+                    var invalid = original with { PromptTemplate = "{{ if }}" };
+                    var validationResponse = await client.PostAsJsonAsync("/api/v1/workflow/validate", invalid, cancellationToken);
+                    Assert.Equal(HttpStatusCode.OK, validationResponse.StatusCode);
+                    var validationText = await validationResponse.Content.ReadAsStringAsync(cancellationToken);
+                    Assert.Contains("\"valid\":false", validationText, StringComparison.OrdinalIgnoreCase);
+                    Assert.DoesNotContain(secret, validationText, StringComparison.Ordinal);
+                    Assert.Contains("Prompt A", await File.ReadAllTextAsync(workflowPath, cancellationToken), StringComparison.Ordinal);
+
+                    var missingRevisionResponse = await client.PutAsJsonAsync("/api/v1/workflow",
+                        original with { ContentRevision = null, ExpectedRevision = null }, cancellationToken);
+                    Assert.Equal((HttpStatusCode)428, missingRevisionResponse.StatusCode);
+
+                    var saveResponse = await client.PutAsJsonAsync("/api/v1/workflow", original with { PromptTemplate = "Prompt B" }, cancellationToken);
+                    Assert.Equal(HttpStatusCode.OK, saveResponse.StatusCode);
+                    var conflictResponse = await client.PutAsJsonAsync("/api/v1/workflow", original with { PromptTemplate = "Prompt C" }, cancellationToken);
+                    Assert.Equal(HttpStatusCode.Conflict, conflictResponse.StatusCode);
+                    var conflictText = await conflictResponse.Content.ReadAsStringAsync(cancellationToken);
+                    Assert.Contains("workflow_revision_conflict", conflictText, StringComparison.Ordinal);
+                    Assert.DoesNotContain(secret, conflictText, StringComparison.Ordinal);
+                    await app.StopAsync(cancellationToken);
+                });
+            Assert.True(exitCode == 0, stderr.ToString());
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            TryDeleteFile(dbPath);
+            TryDeleteFile(workflowPath);
+            TryDeleteFile(workflowPath + ".edit.lock");
+        }
+    }
+
+    [Fact]
     public async Task WorkflowEndpoint_ShouldRejectTrackerPlaceholderWhenNoInlineSecretCanBeRestored()
     {
         var apiKeyEnvVar = $"SYMPHONY_TEST_GITHUB_TOKEN_{Guid.NewGuid():N}";

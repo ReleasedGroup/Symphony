@@ -2003,6 +2003,11 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Workflow file changes are detected and trigger re-read/re-apply without restart
 - Invalid workflow reload keeps last known good effective configuration and emits an
   operator-visible error
+- Managed workflow editor GET returns opaque on-disk and effective loaded revisions;
+  inline secrets in management responses are masked
+- Managed workflow editor validation checks YAML and prompt syntax without writing;
+  conditional save rejects stale revisions with a typed conflict and atomically replaces
+  the file only after validation
 - Missing `WORKFLOW.md` returns typed error
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error

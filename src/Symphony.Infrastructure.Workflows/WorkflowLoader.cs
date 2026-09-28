@@ -1,5 +1,6 @@
 using Symphony.Core.Defaults;
 using Symphony.Infrastructure.Workflows.Models;
+using Scriban;
 using YamlDotNet.Core;
 using YamlDotNet.Serialization;
 
@@ -28,15 +29,26 @@ public sealed class WorkflowLoader
             throw new WorkflowLoadException("missing_workflow_file", $"Workflow file could not be read at '{workflowPath}'.", ex);
         }
 
+        return ParseContent(rawContent, workflowPath);
+    }
+
+    public WorkflowDefinition ParseContent(string rawContent, string sourcePath)
+    {
         var (config, promptTemplate) = ParseWorkflowContent(rawContent);
         var runtime = ParseRuntimeSettings(config);
+
+        if (!string.IsNullOrWhiteSpace(promptTemplate) && Template.Parse(promptTemplate).HasErrors)
+        {
+            throw new WorkflowLoadException("template_parse_error", "Prompt template has invalid syntax.");
+        }
 
         return new WorkflowDefinition(
             config,
             promptTemplate,
             runtime,
-            workflowPath,
-            DateTimeOffset.UtcNow);
+            sourcePath,
+            DateTimeOffset.UtcNow,
+            WorkflowRevision.Compute(rawContent));
     }
 
     private static (IReadOnlyDictionary<string, object?> Config, string PromptTemplate) ParseWorkflowContent(string rawContent)
@@ -77,9 +89,9 @@ public sealed class WorkflowLoader
             var config = ConvertToRootMap(yamlRoot);
             return (config, markdownBody);
         }
-        catch (YamlException ex)
+        catch (YamlException)
         {
-            throw new WorkflowLoadException("workflow_parse_error", $"Workflow front matter YAML could not be parsed: {ex.Message}", ex);
+            throw new WorkflowLoadException("workflow_parse_error", "Workflow front matter YAML could not be parsed.");
         }
     }
 
@@ -134,7 +146,7 @@ public sealed class WorkflowLoader
         var kind = GetRequiredString(trackerMap, "kind", "missing_tracker_kind");
         if (!kind.Equals("github", StringComparison.OrdinalIgnoreCase))
         {
-            throw new WorkflowLoadException("unsupported_tracker_kind", $"Unsupported tracker.kind '{kind}'. Expected 'github'.");
+            throw new WorkflowLoadException("unsupported_tracker_kind", "Unsupported tracker.kind. Expected 'github'.");
         }
 
         var endpoint = GetOptionalString(trackerMap, "endpoint") ?? "https://api.github.com/graphql";

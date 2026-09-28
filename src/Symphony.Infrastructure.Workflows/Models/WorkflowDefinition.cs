@@ -5,4 +5,5 @@ public sealed record WorkflowDefinition(
     string PromptTemplate,
     WorkflowRuntimeSettings Runtime,
     string SourcePath,
-    DateTimeOffset LoadedAtUtc);
+    DateTimeOffset LoadedAtUtc,
+    string? ContentRevision = null);
