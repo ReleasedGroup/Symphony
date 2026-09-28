@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Symphony.Core.Abstractions;
 using Symphony.Core.Metadata;
@@ -264,20 +265,27 @@ public sealed partial class CodexAgentRunner(
 
             await SendNotificationAsync(process.StandardInput, "initialized", new { }, cancellationToken);
 
+            var modelCatalog = IsDirectCodexCliAppServerCommand(request.Command)
+                ? await ReadModelCatalogAsync(process.StandardInput, protocolReader, onUpdate,
+                    request.ReadTimeoutMs, cancellationToken)
+                : null;
+
+            var threadStartParameters = new Dictionary<string, object?>
+            {
+                ["approvalPolicy"] = request.ApprovalPolicy,
+                ["sandbox"] = CodexProtocolValueNormalizer.NormalizeThreadSandbox(request.ThreadSandbox),
+                ["cwd"] = request.WorkspacePath,
+                ["tools"] = BuildAdvertisedTools(request)
+            };
             await SendRequestAsync(
                 process.StandardInput,
                 requestId: 2,
                 method: "thread/start",
-                @params: new
-                {
-                    approvalPolicy = request.ApprovalPolicy,
-                    sandbox = CodexProtocolValueNormalizer.NormalizeThreadSandbox(request.ThreadSandbox),
-                    cwd = request.WorkspacePath,
-                    tools = BuildAdvertisedTools(request)
-                },
+                @params: threadStartParameters,
                 cancellationToken);
 
             string threadId;
+            string? modelOverride;
             using (var threadResponse = await ReadResponseAsync(
                        protocolReader,
                        expectedRequestId: 2,
@@ -287,6 +295,27 @@ public sealed partial class CodexAgentRunner(
             {
                 EnsureNoProtocolError(threadResponse.RootElement, "thread/start");
                 threadId = GetRequiredString(threadResponse.RootElement, "result", "thread", "id");
+                var selectedModel = GetOptionalString(threadResponse.RootElement, "result", "model")
+                    ?? GetOptionalString(threadResponse.RootElement, "result", "thread", "model");
+                modelOverride = modelCatalog is null
+                    ? null
+                    : CodexModelSelector.SelectOverride(modelCatalog, selectedModel);
+            }
+
+            if (modelOverride is not null)
+            {
+                threadStartParameters["model"] = modelOverride;
+                await SendRequestAsync(process.StandardInput, 6, "thread/start", threadStartParameters, cancellationToken);
+                using var fallbackResponse = await ReadResponseAsync(
+                    protocolReader, 6, onUpdate, request.ReadTimeoutMs, cancellationToken);
+                EnsureNoProtocolError(fallbackResponse.RootElement, "thread/start");
+                threadId = GetRequiredString(fallbackResponse.RootElement, "result", "thread", "id");
+                await ReportUpdateAsync(onUpdate, new AgentRunUpdate(
+                    EventType: "model_fallback_selected",
+                    Timestamp: DateTimeOffset.UtcNow,
+                    CodexAppServerPid: process.Id,
+                    Message: $"Configured Codex model is unavailable to this account; using {modelOverride}."),
+                    cancellationToken);
             }
 
             for (var turnNumber = 1; turnNumber <= request.MaxTurns; turnNumber++)
@@ -535,6 +564,24 @@ public sealed partial class CodexAgentRunner(
 
         if (IsTurnCompletedEvent(eventName))
         {
+            var status = GetOptionalString(message, "params", "turn", "status");
+            if (status is "failed" or "interrupted")
+            {
+                var errorMessage = SecretRedactor.Redact(
+                    GetOptionalString(message, "params", "turn", "error", "message"),
+                    request.TrackerQuery?.ApiKey);
+                var failed = status == "failed";
+                var failureMessage = string.IsNullOrWhiteSpace(errorMessage)
+                    ? failed ? "Codex turn failed." : "Codex turn was interrupted."
+                    : errorMessage;
+                await ReportUpdateAsync(onUpdate, update with
+                {
+                    EventType = failed ? "turn_failed" : "turn_cancelled",
+                    Message = failureMessage
+                }, cancellationToken);
+                throw new RunnerFailureException(failed ? "turn_failed" : "turn_cancelled", failureMessage);
+            }
+
             await ReportUpdateAsync(
                 onUpdate,
                 update with
@@ -773,6 +820,56 @@ public sealed partial class CodexAgentRunner(
     private static bool IsLikelyAppServerCommand(string command)
     {
         return command.Contains("app-server", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsDirectCodexCliAppServerCommand(string command)
+        => Regex.IsMatch(command, @"\bcodex(?:\.exe|\.cmd)?\s+app-server\b", RegexOptions.IgnoreCase);
+
+    private static async Task<IReadOnlyList<CodexModelSelector.Page>?> ReadModelCatalogAsync(
+        StreamWriter stdin,
+        ProtocolReader protocolReader,
+        Func<AgentRunUpdate, CancellationToken, Task>? onUpdate,
+        int readTimeoutMs,
+        CancellationToken cancellationToken)
+    {
+        var pages = new List<CodexModelSelector.Page>();
+        var seenCursors = new HashSet<string>(StringComparer.Ordinal);
+        string? cursor = null;
+        for (var pageNumber = 0; pageNumber < 100; pageNumber++)
+        {
+            var parameters = cursor is null
+                ? (object)new { limit = 100, includeHidden = true }
+                : new { limit = 100, includeHidden = true, cursor };
+            await SendRequestAsync(stdin, 5, "model/list", parameters, cancellationToken);
+            using var response = await ReadResponseAsync(protocolReader, 5, onUpdate, readTimeoutMs, cancellationToken);
+            try
+            {
+                EnsureNoProtocolError(response.RootElement, "model/list");
+            }
+            catch (RunnerFailureException ex) when (ex.Code == "response_error")
+            {
+                // Older app-server versions may not expose model discovery.
+                return null;
+            }
+
+            var page = CodexModelSelector.ParsePage(response.RootElement);
+            if (page is null)
+            {
+                return null;
+            }
+            pages.Add(page);
+            cursor = page.NextCursor;
+            if (string.IsNullOrEmpty(cursor))
+            {
+                return pages;
+            }
+            if (!seenCursors.Add(cursor))
+            {
+                throw new RunnerFailureException("response_error", "Model catalog returned a repeated pagination cursor.");
+            }
+        }
+
+        throw new RunnerFailureException("response_error", "Model catalog exceeded 100 pages.");
     }
 
     private static object BuildCapabilities(AgentRunRequest request)

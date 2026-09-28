@@ -125,7 +125,9 @@ The workflow editor writes back to `WORKFLOW.md` after validating the updated YA
 For Codex app-server runs, Symphony:
 
 - starts one app-server subprocess per worker attempt
+- checks the installed CLI's model catalog and selects the account default when the configured model is unavailable
 - reuses the same `threadId` across continuation turns
+- treats failed or interrupted `turn/completed` statuses as run failures, with the Codex error in the attempt diagnostics
 - refreshes the GitHub issue state after each successful turn
 - continues on the live thread until the issue leaves the configured active states, stops matching the configured labels or milestone, or `agent.max_turns` is reached
 - keeps parsing strictly on stdout only
