@@ -479,8 +479,53 @@ public sealed class CodexAgentRunnerTests
             {"result":{"data":[{"id":"gpt-6-astra","isDefault":true,"hidden":false},
             {"id":"gpt-5.5","isDefault":false,"hidden":false}],"nextCursor":null}}
             """);
-        Assert.Equal("gpt-6-astra", CodexModelSelector.SelectOverride(catalog.RootElement, "gpt-6-sol"));
-        Assert.Null(CodexModelSelector.SelectOverride(catalog.RootElement, "gpt-5.5"));
+        var pages = new[] { CodexModelSelector.ParsePage(catalog.RootElement)! };
+        Assert.Equal("gpt-6-astra", CodexModelSelector.SelectOverride(pages, "gpt-6-sol"));
+        Assert.Null(CodexModelSelector.SelectOverride(pages, "gpt-5.5"));
+    }
+
+    [Fact]
+    public async Task RunIssueAsync_ShouldUseDefaultModelFromPaginatedCatalog()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return;
+        }
+
+        using var harness = CreateAppServerHarness(PaginatedModelFallbackScript());
+        var updates = new List<AgentRunUpdate>();
+        var result = await CreateRunner().RunIssueAsync(
+            CreateRequest("model-fallback", "#model-fallback", harness.WorkspacePath,
+                harness.Command + " codex app-server", 30_000),
+            (update, _) => { updates.Add(update); return Task.CompletedTask; });
+
+        Assert.True(result.Success, result.Stderr);
+        Assert.Contains(updates, update => update.EventType == "model_fallback_selected" &&
+            update.Message?.Contains("gpt-6-astra", StringComparison.Ordinal) == true);
+        Assert.Contains(updates, update => update.EventType == "session_started" && update.ThreadId == "thread-2");
+    }
+
+    [Fact]
+    public async Task RunIssueAsync_ShouldPreserveModelDiscoveryTransportFailure()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return;
+        }
+
+        using var harness = CreateAppServerHarness("""
+            while (($line = [Console]::In.ReadLine()) -ne $null) {
+                $request = $line | ConvertFrom-Json
+                if ($request.method -eq 'initialize') { @{ id = $request.id; result = @{} } | ConvertTo-Json -Compress; continue }
+                if ($request.method -eq 'model/list') { exit 0 }
+            }
+            """);
+        var result = await CreateRunner().RunIssueAsync(
+            CreateRequest("model-transport", "#model-transport", harness.WorkspacePath,
+                harness.Command + " codex app-server", 30_000));
+
+        Assert.False(result.Success);
+        Assert.Equal("subprocess_exit", result.ErrorCode);
     }
 
     [RealCodexCliFact]
@@ -645,6 +690,47 @@ public sealed class CodexAgentRunnerTests
                 continue
             }
             if ($request.method -eq 'shutdown') { @{ id = $request.id; result = @{ ok = $true } } | ConvertTo-Json -Compress; break }
+        }
+        """;
+
+    private static string PaginatedModelFallbackScript() => """
+        $threadStarts = 0
+        $catalogPages = 0
+        while (($line = [Console]::In.ReadLine()) -ne $null) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $request = $line | ConvertFrom-Json
+            if ($request.method -eq 'initialize') { @{ id = $request.id; result = @{} } | ConvertTo-Json -Compress; continue }
+            if ($request.method -eq 'model/list') {
+                $catalogPages++
+                if ($catalogPages -eq 1 -and -not $request.params.cursor) {
+                    @{ id = $request.id; result = @{ data = @(@{ id = 'gpt-5.5'; isDefault = $false; hidden = $false }); nextCursor = 'page-2' } } | ConvertTo-Json -Depth 8 -Compress
+                    continue
+                }
+                if ($catalogPages -eq 2 -and $request.params.cursor -eq 'page-2') {
+                    @{ id = $request.id; result = @{ data = @(@{ id = 'gpt-6-astra'; isDefault = $true; hidden = $false }); nextCursor = $null } } | ConvertTo-Json -Depth 8 -Compress
+                    continue
+                }
+                throw 'unexpected model catalog request'
+            }
+            if ($request.method -eq 'thread/start') {
+                $threadStarts++
+                if ($threadStarts -eq 1 -and -not $request.params.model) {
+                    @{ id = $request.id; result = @{ model = 'gpt-6-sol'; thread = @{ id = 'thread-1' } } } | ConvertTo-Json -Depth 8 -Compress
+                    continue
+                }
+                if ($threadStarts -eq 2 -and $request.params.model -eq 'gpt-6-astra') {
+                    @{ id = $request.id; result = @{ model = 'gpt-6-astra'; thread = @{ id = 'thread-2' } } } | ConvertTo-Json -Depth 8 -Compress
+                    continue
+                }
+                throw 'unexpected thread model'
+            }
+            if ($request.method -eq 'turn/start') {
+                if ($catalogPages -ne 2 -or $threadStarts -ne 2 -or $request.params.threadId -ne 'thread-2') { throw 'fallback was not used' }
+                @{ id = $request.id; result = @{ turn = @{ id = 'turn-1' } } } | ConvertTo-Json -Compress
+                @{ method = 'turn/completed'; params = @{ turn = @{ id = 'turn-1'; status = 'completed' } } } | ConvertTo-Json -Depth 8 -Compress
+                continue
+            }
+            if ($request.method -eq 'shutdown') { @{ id = $request.id; result = @{} } | ConvertTo-Json -Compress; break }
         }
         """;
 

@@ -265,7 +265,7 @@ public sealed partial class CodexAgentRunner(
 
             await SendNotificationAsync(process.StandardInput, "initialized", new { }, cancellationToken);
 
-            using var modelCatalog = IsDirectCodexCliAppServerCommand(request.Command)
+            var modelCatalog = IsDirectCodexCliAppServerCommand(request.Command)
                 ? await ReadModelCatalogAsync(process.StandardInput, protocolReader, onUpdate,
                     request.ReadTimeoutMs, cancellationToken)
                 : null;
@@ -299,7 +299,7 @@ public sealed partial class CodexAgentRunner(
                     ?? GetOptionalString(threadResponse.RootElement, "result", "thread", "model");
                 modelOverride = modelCatalog is null
                     ? null
-                    : CodexModelSelector.SelectOverride(modelCatalog.RootElement, selectedModel);
+                    : CodexModelSelector.SelectOverride(modelCatalog, selectedModel);
             }
 
             if (modelOverride is not null)
@@ -825,33 +825,51 @@ public sealed partial class CodexAgentRunner(
     private static bool IsDirectCodexCliAppServerCommand(string command)
         => Regex.IsMatch(command, @"\bcodex(?:\.exe|\.cmd)?\s+app-server\b", RegexOptions.IgnoreCase);
 
-    private static async Task<JsonDocument?> ReadModelCatalogAsync(
+    private static async Task<IReadOnlyList<CodexModelSelector.Page>?> ReadModelCatalogAsync(
         StreamWriter stdin,
         ProtocolReader protocolReader,
         Func<AgentRunUpdate, CancellationToken, Task>? onUpdate,
         int readTimeoutMs,
         CancellationToken cancellationToken)
     {
-        try
+        var pages = new List<CodexModelSelector.Page>();
+        var seenCursors = new HashSet<string>(StringComparer.Ordinal);
+        string? cursor = null;
+        for (var pageNumber = 0; pageNumber < 100; pageNumber++)
         {
-            await SendRequestAsync(stdin, 5, "model/list", new { limit = 100, includeHidden = true }, cancellationToken);
-            var catalog = await ReadResponseAsync(protocolReader, 5, onUpdate, readTimeoutMs, cancellationToken);
+            var parameters = cursor is null
+                ? (object)new { limit = 100, includeHidden = true }
+                : new { limit = 100, includeHidden = true, cursor };
+            await SendRequestAsync(stdin, 5, "model/list", parameters, cancellationToken);
+            using var response = await ReadResponseAsync(protocolReader, 5, onUpdate, readTimeoutMs, cancellationToken);
             try
             {
-                EnsureNoProtocolError(catalog.RootElement, "model/list");
-                return catalog;
+                EnsureNoProtocolError(response.RootElement, "model/list");
             }
-            catch
+            catch (RunnerFailureException ex) when (ex.Code == "response_error")
             {
-                catalog.Dispose();
-                throw;
+                // Older app-server versions may not expose model discovery.
+                return null;
+            }
+
+            var page = CodexModelSelector.ParsePage(response.RootElement);
+            if (page is null)
+            {
+                return null;
+            }
+            pages.Add(page);
+            cursor = page.NextCursor;
+            if (string.IsNullOrEmpty(cursor))
+            {
+                return pages;
+            }
+            if (!seenCursors.Add(cursor))
+            {
+                throw new RunnerFailureException("response_error", "Model catalog returned a repeated pagination cursor.");
             }
         }
-        catch (RunnerFailureException)
-        {
-            // Older app-server versions may not expose model discovery.
-            return null;
-        }
+
+        throw new RunnerFailureException("response_error", "Model catalog exceeded 100 pages.");
     }
 
     private static object BuildCapabilities(AgentRunRequest request)
