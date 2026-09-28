@@ -334,18 +334,36 @@ internal static partial class SymphonyManagedInstallCommand
     private static string ResolvePhysicalPath(string path)
     {
         var fullPath = Path.GetFullPath(path);
-        var root = Path.GetPathRoot(fullPath)!;
-        var resolved = root;
-        foreach (var segment in Path.GetRelativePath(root, fullPath)
-                     .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+        for (var pass = 0; pass < 32; pass++)
         {
-            resolved = Path.Combine(resolved, segment);
-            if (Directory.Exists(resolved))
+            var root = Path.GetPathRoot(fullPath)!;
+            var resolved = root;
+            var resolvedLink = false;
+            foreach (var segment in Path.GetRelativePath(root, fullPath)
+                         .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
             {
-                resolved = new DirectoryInfo(resolved).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? resolved;
+                resolved = Path.Combine(resolved, segment);
+                if (!Directory.Exists(resolved))
+                {
+                    continue;
+                }
+
+                var linkTarget = new DirectoryInfo(resolved).ResolveLinkTarget(returnFinalTarget: true);
+                if (linkTarget is not null)
+                {
+                    resolved = linkTarget.FullName;
+                    resolvedLink = true;
+                }
+            }
+
+            fullPath = Path.GetFullPath(resolved);
+            if (!resolvedLink)
+            {
+                return fullPath;
             }
         }
-        return Path.GetFullPath(resolved);
+
+        throw new IOException("Managed install path contains too many symbolic links.");
     }
 
     private static bool HasEndpointOverride(JsonObject configuration)

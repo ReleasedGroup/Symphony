@@ -183,15 +183,20 @@ public sealed class ManagedInstallTests
         var fixture = await Fixture.CreateAsync();
         try
         {
-            var alias = Path.Combine(fixture.Root, "bundle-alias");
-            try { Directory.CreateSymbolicLink(alias, fixture.BundlePath); }
+            var firstAlias = Path.Combine(fixture.Root, "bundle-alias");
+            var secondAlias = Path.Combine(fixture.Root, "nested-alias");
+            try
+            {
+                Directory.CreateSymbolicLink(firstAlias, fixture.BundlePath);
+                Directory.CreateSymbolicLink(secondAlias, firstAlias);
+            }
             catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.ComponentModel.Win32Exception)
             {
                 return;
             }
 
             var arguments = (string[])fixture.Arguments.Clone();
-            arguments[3] = Path.Combine(alias, "instance");
+            arguments[3] = Path.Combine(secondAlias, "instance");
             var output = new StringWriter();
             var exit = await SymphonyManagedInstallCommand.RunAsync(
                 arguments, output, CancellationToken.None, fixture.Runtime);
