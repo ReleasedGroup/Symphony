@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Options;
 using Symphony.Core.Configuration;
 using Symphony.Infrastructure.Workflows.Models;
@@ -148,7 +149,8 @@ public sealed class WorkflowEditorService(
             return WorkflowEditorTextDocument.Compose(restored.FrontMatter, restored.Prompt);
         }
         catch (WorkflowLoadException ex) when (ex.Code == WorkflowSecretMasker.InvalidPlaceholderCode &&
-                                             draftFrontMatter.Contains(TrackerApiKeyPlaceholder, StringComparison.Ordinal))
+                                             draftFrontMatter.Contains(TrackerApiKeyPlaceholder, StringComparison.Ordinal) &&
+                                             !WorkflowSecretMasker.Mask(current.FrontMatterText, current.PromptTemplate).HasMaskedTrackerApiKey)
         {
             throw new WorkflowLoadException(InvalidTrackerApiKeyPlaceholderCode,
                 "The tracker API key placeholder has no matching value in the current workflow.");
@@ -161,6 +163,13 @@ public sealed class WorkflowEditorService(
     private static async Task<FileStream> AcquireWriteLockAsync(string workflowPath, CancellationToken cancellationToken)
     {
         var lockPath = workflowPath + ".edit.lock";
+        var directory = Path.GetDirectoryName(lockPath);
+        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+        {
+            throw new WorkflowLoadException("missing_workflow_file", "The workflow directory no longer exists.");
+        }
+
+        var elapsed = Stopwatch.StartNew();
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -168,9 +177,21 @@ public sealed class WorkflowEditorService(
             {
                 return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
             }
-            catch (IOException)
+            catch (DirectoryNotFoundException)
+            {
+                throw new WorkflowLoadException("missing_workflow_file", "The workflow directory no longer exists.");
+            }
+            catch (IOException) when (elapsed.Elapsed < TimeSpan.FromSeconds(5))
             {
                 await Task.Delay(50, cancellationToken);
+            }
+            catch (IOException)
+            {
+                throw new WorkflowLoadException("workflow_lock_unavailable", "The workflow edit lock is unavailable.");
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw new WorkflowLoadException("workflow_lock_unavailable", "The workflow edit lock is unavailable.");
             }
         }
     }

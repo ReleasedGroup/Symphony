@@ -657,6 +657,88 @@ public sealed class WorkflowLoaderTests
         }
     }
 
+    [Fact]
+    public async Task WorkflowEditorService_ShouldMaskQuotedYamlKeysAndShortPromptSecrets()
+    {
+        var path = CreateWorkflowPath();
+        await File.WriteAllTextAsync(path, "---\ntracker:\n  kind: github\n  \"api_key\": \"abc\"\n  owner: released\n  repo: symphony\n'custom_secret': xyz\n---\ntoken: q\n");
+        try
+        {
+            var editor = CreateEditorService(path);
+            var document = await editor.GetCurrentAsync();
+            Assert.True(document.HasMaskedTrackerApiKey);
+            Assert.DoesNotContain("abc", document.FrontMatterText, StringComparison.Ordinal);
+            Assert.DoesNotContain("xyz", document.FrontMatterText, StringComparison.Ordinal);
+            Assert.DoesNotContain("token: q", document.PromptTemplate, StringComparison.Ordinal);
+            Assert.Contains(WorkflowEditorService.TrackerApiKeyPlaceholder, document.FrontMatterText, StringComparison.Ordinal);
+            var saved = await editor.SaveAsync(document with { PromptTemplate = document.PromptTemplate + "\nAnother line." });
+            Assert.NotNull(saved.ContentRevision);
+            var persisted = await File.ReadAllTextAsync(path);
+            Assert.Contains("\"api_key\": \"abc\"", persisted, StringComparison.Ordinal);
+            Assert.Contains("token: q", persisted, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete(path + ".edit.lock");
+        }
+    }
+
+    [Fact]
+    public async Task WorkflowEditorService_ShouldRejectPlaceholderMovedToPromptOrOtherYamlKey()
+    {
+        var path = CreateWorkflowPath();
+        await File.WriteAllTextAsync(path, "---\ntracker:\n  kind: github\n  api_key: inline-secret\n  owner: released\n  repo: symphony\n---\nPrompt\n");
+        try
+        {
+            var editor = CreateEditorService(path);
+            var document = await editor.GetCurrentAsync();
+            var movedToPrompt = document with { PromptTemplate = "Prompt\n" + WorkflowEditorService.TrackerApiKeyPlaceholder };
+            var promptError = await Assert.ThrowsAsync<WorkflowLoadException>(() => editor.SaveAsync(movedToPrompt));
+            Assert.Equal("invalid_workflow_editor_secret_placeholder", promptError.Code);
+
+            var movedToOtherKey = document with
+            {
+                FrontMatterText = document.FrontMatterText.Replace(
+                    "api_key: " + WorkflowEditorService.TrackerApiKeyPlaceholder,
+                    "other_key: " + WorkflowEditorService.TrackerApiKeyPlaceholder,
+                    StringComparison.Ordinal)
+            };
+            var yamlError = await Assert.ThrowsAsync<WorkflowLoadException>(() => editor.SaveAsync(movedToOtherKey));
+            Assert.Equal("invalid_workflow_editor_secret_placeholder", yamlError.Code);
+
+            var movedUnderOtherParent = document with
+            {
+                FrontMatterText = document.FrontMatterText.Replace(
+                    "  api_key: " + WorkflowEditorService.TrackerApiKeyPlaceholder,
+                    string.Empty, StringComparison.Ordinal) +
+                    "\nother:\n  api_key: " + WorkflowEditorService.TrackerApiKeyPlaceholder
+            };
+            var pathError = await Assert.ThrowsAsync<WorkflowLoadException>(() => editor.SaveAsync(movedUnderOtherParent));
+            Assert.Equal("invalid_workflow_editor_secret_placeholder", pathError.Code);
+            Assert.Contains("api_key: inline-secret", await File.ReadAllTextAsync(path), StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete(path + ".edit.lock");
+        }
+    }
+
+    [Fact]
+    public async Task WorkflowEditorService_ShouldFailWhenLockDirectoryDisappears()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"symphony-workflow-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "WORKFLOW.md");
+        await File.WriteAllTextAsync(path, "---\ntracker:\n  kind: github\n  api_key: $GITHUB_TOKEN\n  owner: released\n  repo: symphony\n---\nPrompt\n");
+        var editor = CreateEditorService(path);
+        var document = await editor.GetCurrentAsync();
+        Directory.Delete(directory, recursive: true);
+        var error = await Assert.ThrowsAsync<WorkflowLoadException>(() => editor.SaveAsync(document));
+        Assert.Equal("missing_workflow_file", error.Code);
+    }
+
     private static string CreateWorkflowPath()
     {
         return Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");
