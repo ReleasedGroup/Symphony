@@ -47,7 +47,7 @@ public sealed class HostLifecycleTests
                 });
 
             Assert.True(exitCode == 0, stderr.ToString());
-            Assert.Equal(Path.GetFullPath(workflowPath), loadedWorkflowPath);
+            Assert.Equal(Path.GetFullPath("WORKFLOW.md"), loadedWorkflowPath);
             Assert.Single(urls);
             Assert.StartsWith("http://127.0.0.1:", urls[0], StringComparison.OrdinalIgnoreCase);
             Assert.Equal(string.Empty, stderr.ToString());
