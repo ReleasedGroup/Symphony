@@ -19,6 +19,58 @@ namespace Symphony.Integration.Tests;
 public sealed class ApiSmokeTests
 {
     [Fact]
+    [Trait("Spec", "17.4")]
+    public async Task ManagementEndpoints_ShouldPauseDrainAndResumeWithStableResponses()
+    {
+        var workflowPath = CreateValidWorkflowPath();
+        var dbPath = Path.Combine(Path.GetTempPath(), $"symphony-int-{Guid.NewGuid():N}.db");
+        var stderr = new StringWriter();
+        try
+        {
+            var exitCode = await SymphonyHostApplication.RunCliAsync(
+                [workflowPath], stderr,
+                configureBuilder: builder => ConfigureTestServer(builder, dbPath),
+                configureServices: services => RegisterFakeTracker(services),
+                runApplicationAsync: async (app, cancellationToken) =>
+                {
+                    await app.StartAsync(cancellationToken);
+                    using var client = app.GetTestClient();
+
+                    var invalid = await client.PostAsync(
+                        "/api/v1/management/drain?timeout_ms=-1", null, cancellationToken);
+                    Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+                    Assert.Contains("invalid_drain_timeout",
+                        await invalid.Content.ReadAsStringAsync(cancellationToken), StringComparison.Ordinal);
+                    var malformed = await client.PostAsync(
+                        "/api/v1/management/drain?timeout_ms=not-a-number", null, cancellationToken);
+                    Assert.Equal(HttpStatusCode.BadRequest, malformed.StatusCode);
+                    Assert.Contains("invalid_drain_timeout",
+                        await malformed.Content.ReadAsStringAsync(cancellationToken), StringComparison.Ordinal);
+
+                    var pause = await client.PostAsync("/api/v1/management/pause", null, cancellationToken);
+                    Assert.Equal(HttpStatusCode.OK, pause.StatusCode);
+                    using var paused = JsonDocument.Parse(await client.GetStringAsync(
+                        "/api/v1/management/status", cancellationToken));
+                    Assert.Equal("suspended", paused.RootElement.GetProperty("state").GetString());
+                    Assert.True(paused.RootElement.GetProperty("quiescent").GetBoolean());
+
+                    var resume = await client.PostAsync("/api/v1/management/resume", null, cancellationToken);
+                    Assert.Equal(HttpStatusCode.OK, resume.StatusCode);
+                    using var resumed = JsonDocument.Parse(await resume.Content.ReadAsStringAsync(cancellationToken));
+                    Assert.Equal("running", resumed.RootElement.GetProperty("state").GetString());
+                    await app.StopAsync(cancellationToken);
+                });
+            Assert.True(exitCode == 0, stderr.ToString());
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            TryDeleteFile(dbPath);
+            TryDeleteFile(workflowPath);
+        }
+    }
+
+    [Fact]
     public async Task HealthEndpoint_ShouldReturnSuccess()
     {
         var workflowPath = CreateValidWorkflowPath();

@@ -103,6 +103,12 @@ Symphony exposes these HTTP endpoints:
 - `GET /api/v1/state`: running sessions, retry queue, tracked issue distribution, recent activity, lease state, token totals, runtime totals, and latest rate limits
 - `GET /api/v1/<issue_identifier>`: issue-specific runtime/debug view
 - `POST /api/v1/refresh`: queue an immediate best-effort poll/reconcile cycle
+- `GET /api/v1/management/status`: current persisted pause state, active run count, pending retry count, and quiescence
+- `POST /api/v1/management/pause`: persist a dispatch pause immediately; active runs continue
+- `POST /api/v1/management/drain?timeout_ms=30000`: pause and wait for active runs to finish; returns `200` only when quiescent, or `202` with state `draining` on timeout. The timeout may be 0–300000 ms; invalid values return `invalid_drain_timeout`.
+- `POST /api/v1/management/resume`: clear the pause and queue an immediate refresh
+
+Pause, drain, resume, and status are idempotent. A paused host still reconciles existing work and retains pending retries without dispatching them. The pause survives process restart. The management API is intended for a device-local supervisor over loopback; do not expose the unauthenticated host port directly to a network.
 
 The state and issue endpoints are derived from persisted orchestrator state in SQLite rather than ad hoc in-memory caches.
 Dashboard and `/api/v1/state` token totals are derived from absolute Codex usage snapshots such as `thread/tokenUsage/updated` and `total_token_usage`. Delta-only payloads like `last_token_usage`, and generic `usage` maps on ordinary notifications or turn events, are ignored to avoid double-counting, so totals only advance when Codex emits a new absolute snapshot.

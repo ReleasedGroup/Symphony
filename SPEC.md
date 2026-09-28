@@ -1560,11 +1560,29 @@ API design notes:
 
 - The JSON shapes above are the recommended baseline for interoperability and debugging ergonomics.
 - Implementations may add fields, but should avoid breaking existing fields within a version.
-- Endpoints should be read-only except for operational triggers like `/refresh`.
+- Endpoints should be read-only except for documented operational controls such as `/refresh`
+  and the managed controls in section 13.8.
 - Unsupported methods on defined routes should return `405 Method Not Allowed`.
 - API errors should use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it should consume this API rather than duplicating state
   logic.
+
+### 13.8 Managed Pause, Drain, and Resume
+
+The local management API exposes `GET /api/v1/management/status` and idempotent `POST`
+operations at `/api/v1/management/pause`, `/drain`, and `/resume`. The persisted pause state
+blocks new issue and retry dispatch across process restarts while reconciliation and active runs
+continue. A dispatch start and pause acknowledgement must be serialized so that no new run
+starts after pause returns.
+
+Status reports the pause state, active run count, pending retry count, and `quiescent`. A paused
+instance is quiescent only when no active runs remain. Drain first persists pause, then waits up
+to `timeout_ms` (default 30000, allowed 0–300000). It returns `200` only if quiescent; timeout
+returns `202` with state `draining`, never a success claim. Invalid timeouts return `400` with
+code `invalid_drain_timeout`. Resume clears pause and requests an immediate refresh.
+
+These controls are intended for a device-local supervisor over loopback. The host API has no
+authentication and must not be exposed directly to a network.
 
 ## 14. Failure Model and Recovery Strategy
 
@@ -2030,6 +2048,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
 
+- Managed pause survives restart, blocks new issue and retry dispatch, and retains pending retries
+- Pause during candidate fetch or dispatch cannot start work after pause acknowledgement
+- Drain timeout reports `draining`; quiescence is reported only after active runs finish
+- Resume is idempotent and permits pending retry dispatch on the next tick
 - Dispatch sort order is priority then oldest creation time
 - `Todo` issue with non-terminal blockers is not eligible
 - `Todo` issue with terminal blockers is eligible

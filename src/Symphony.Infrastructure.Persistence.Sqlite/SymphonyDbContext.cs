@@ -15,9 +15,19 @@ public sealed class SymphonyDbContext(DbContextOptions<SymphonyDbContext> option
     public DbSet<RetryQueueEntity> RetryQueue => Set<RetryQueueEntity>();
     public DbSet<WorkspaceRecordEntity> WorkspaceRecords => Set<WorkspaceRecordEntity>();
     public DbSet<EventLogEntity> EventLog => Set<EventLogEntity>();
+    public DbSet<ManagementControlEntity> ManagementControl => Set<ManagementControlEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<ManagementControlEntity>(entity =>
+        {
+            entity.ToTable("management_control");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Paused).IsRequired();
+            entity.Property(x => x.UpdatedAtUtc).IsRequired();
+            entity.HasData(new ManagementControlEntity());
+        });
+
         modelBuilder.Entity<InstanceLeaseEntity>(entity =>
         {
             entity.ToTable("instance_leases");

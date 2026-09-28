@@ -18,6 +18,7 @@ public sealed partial class OrchestrationTickService
     private readonly SymphonyDbContext dbContext;
     private readonly IWorkspaceManager workspaceManager;
     private readonly IIssueExecutionCoordinator issueExecutionCoordinator;
+    private readonly ManagedControlService managedControlService;
     private readonly OrchestrationOptions orchestrationOptions;
     private readonly TimeProvider timeProvider;
     private readonly ILogger<OrchestrationTickService> logger;
@@ -29,6 +30,7 @@ public sealed partial class OrchestrationTickService
         SymphonyDbContext dbContext,
         IWorkspaceManager workspaceManager,
         IIssueExecutionCoordinator issueExecutionCoordinator,
+        ManagedControlService managedControlService,
         IOptions<OrchestrationOptions> orchestrationOptions,
         TimeProvider timeProvider,
         ILogger<OrchestrationTickService> logger)
@@ -39,6 +41,7 @@ public sealed partial class OrchestrationTickService
         this.dbContext = dbContext;
         this.workspaceManager = workspaceManager;
         this.issueExecutionCoordinator = issueExecutionCoordinator;
+        this.managedControlService = managedControlService;
         this.orchestrationOptions = orchestrationOptions.Value;
         this.timeProvider = timeProvider;
         this.logger = logger;
@@ -138,6 +141,12 @@ public sealed partial class OrchestrationTickService
                     "Skipping dispatch for workflow {WorkflowPath} because preflight validation failed with code {Code}.",
                     workflowDefinition.SourcePath,
                     preflightError?.Code ?? "missing_tracker_api_key");
+                return workflowDefinition.Runtime.Polling.IntervalMs;
+            }
+
+            if (await managedControlService.IsPausedAsync(cancellationToken))
+            {
+                logger.LogInformation("Managed dispatch is paused; skipping new issues and retries.");
                 return workflowDefinition.Runtime.Polling.IntervalMs;
             }
 

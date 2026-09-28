@@ -135,6 +135,15 @@ public sealed partial class OrchestrationTickService
             return false;
         }
 
+        await using var dispatchGate = await managedControlService.TryEnterDispatchAsync(cancellationToken);
+        if (dispatchGate is null)
+        {
+            await coordinationStore.ReleaseIssueClaimAsync(
+                issue.Id, instanceId, "paused", cancellationToken);
+            logger.LogInformation("Dispatch denied for {IssueIdentifier} because managed pause is active.", issue.Identifier);
+            return false;
+        }
+
         var nowUtc = timeProvider.GetUtcNow();
         var run = await dbContext.Runs
             .Where(runEntity =>
@@ -242,11 +251,13 @@ public sealed partial class OrchestrationTickService
             });
 
             await dbContext.SaveChangesAsync(cancellationToken);
+            await dispatchGate.CommitAsync(cancellationToken);
             return false;
         }
 
         var stateKey = NormalizeStateKey(issue.State);
         countsByState[stateKey] = countsByState.GetValueOrDefault(stateKey) + 1;
+        await dispatchGate.CommitAsync(cancellationToken);
         return true;
     }
 

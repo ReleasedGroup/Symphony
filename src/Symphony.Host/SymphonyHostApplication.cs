@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
@@ -132,6 +133,7 @@ internal static class SymphonyHostApplication
         services.AddSingleton<IIssueExecutionCoordinator, IssueExecutionCoordinator>();
         services.AddSingleton<RefreshSignalService>();
         services.AddScoped<OrchestrationTickService>();
+        services.AddScoped<ManagedControlService>();
         services.AddScoped<RuntimeStateService>();
 
         services
@@ -387,6 +389,48 @@ internal static class SymphonyHostApplication
         {
             var payload = await runtimeStateService.GetStateAsync(cancellationToken);
             return Results.Ok(payload);
+        });
+
+        app.MapGet("/api/v1/management/status", async (
+            ManagedControlService control,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await control.GetStatusAsync(cancellationToken)));
+
+        app.MapPost("/api/v1/management/pause", async (
+            ManagedControlService control,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await control.SetPausedAsync(true, cancellationToken)));
+
+        app.MapPost("/api/v1/management/resume", async (
+            ManagedControlService control,
+            RefreshSignalService refreshSignal,
+            CancellationToken cancellationToken) =>
+        {
+            var status = await control.SetPausedAsync(false, cancellationToken);
+            refreshSignal.RequestRefresh();
+            return Results.Ok(status);
+        });
+
+        app.MapPost("/api/v1/management/drain", async (
+            HttpRequest request,
+            ManagedControlService control,
+            CancellationToken cancellationToken) =>
+        {
+            var rawTimeout = request.Query["timeout_ms"].ToString();
+            var timeoutMs = 30_000;
+            if (!string.IsNullOrEmpty(rawTimeout) &&
+                (!int.TryParse(rawTimeout, out timeoutMs) || timeoutMs is < 0 or > 300_000))
+            {
+                return Results.BadRequest(new { error = new
+                {
+                    code = "invalid_drain_timeout",
+                    message = "timeout_ms must be between 0 and 300000."
+                } });
+            }
+
+            var status = await control.DrainAsync(
+                TimeSpan.FromMilliseconds(timeoutMs), cancellationToken);
+            return status.Quiescent ? Results.Ok(status) : Results.Accepted(value: status);
         });
 
         app.MapGet("/api/v1/{issueIdentifier}", async (
