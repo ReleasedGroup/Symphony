@@ -64,3 +64,24 @@ From the instance folder:
 - macOS/Linux: `./run-symphony.sh`
 
 You can also run `Symphony version` to confirm the packaged build version.
+
+## Managed, Noninteractive Installation
+
+Device agents can install without prompts or a plaintext token argument. Prepare an existing `WORKFLOW.md` whose `tracker.api_key` is an environment reference such as `$SYMPHONY_GITHUB_TOKEN`, and an `appsettings.json` JSON object. The install command copies these files into a new instance directory. It sets the requested stable instance ID, a local SQLite database, and the installed workflow path in the copied config. The requested loopback port is used by the generated run scripts.
+
+```text
+Symphony install --managed \
+  --instance-id device-01 \
+  --instance-dir /srv/symphony/device-01 \
+  --workflow-path /srv/symphony/source/WORKFLOW.md \
+  --config-path /srv/symphony/source/appsettings.json \
+  --port 43123 \
+  --github-token-env SYMPHONY_GITHUB_TOKEN \
+  --preflight-only
+```
+
+Remove `--preflight-only` to install. The command returns one JSON object on stdout with `status`, `code`, instance details, and Codex readiness. It refuses an existing target path, a target that resolves inside the package bundle through a symlink or junction, an unavailable loopback port, an invalid workflow or config, source config that overrides the requested network endpoint, or a workflow whose token reference differs from `--github-token-env`. It does not overwrite an instance. Successful installation reports `started: false`; add `--launch` to start immediately. Preflight only checks and writes nothing.
+
+Set the named token environment variable for the account that runs Symphony. That account needs read/write access to the instance directory, its SQLite database and workspaces, and access to git, the repository, and the Codex CLI. Install a supported Codex CLI version and complete `codex login` for that same account; the agent checks both CLI version and authentication before launch. Provision the environment variable through the operating system or service manager. The managed installer does not write a `.env` file or print the token value. On Windows, configure a service identity with access to these resources; on macOS and Linux, use an equivalent dedicated service account and service manager. Use the generated `run-symphony.cmd` or `run-symphony.sh` for subsequent starts.
+
+The managed install tests run on Windows, macOS, and Linux runners, and CI publishes each of the six release RIDs: `win-x64`, `win-arm64`, `osx-x64`, `osx-arm64`, `linux-x64`, and `linux-arm64`.

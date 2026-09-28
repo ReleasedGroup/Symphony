@@ -38,6 +38,14 @@ internal static class SymphonyHostApplication
 
         try
         {
+            if (args.Length >= 2 &&
+                args[0].Equals("install", StringComparison.OrdinalIgnoreCase) &&
+                args[1].Equals("--managed", StringComparison.OrdinalIgnoreCase))
+            {
+                return await SymphonyManagedInstallCommand.RunAsync(
+                    args.Skip(2).ToArray(), standardOutput, cancellationToken);
+            }
+
             var commandLine = HostCommandLineOptions.Parse(args);
             if (commandLine.Mode is HostCommandMode.Version)
             {

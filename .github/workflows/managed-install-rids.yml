@@ -1,0 +1,43 @@
+name: managed-install-rids
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/managed-install-rids.yml'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            rid: win-x64
+          - runner: windows-latest
+            rid: win-arm64
+          - runner: macos-latest
+            rid: osx-x64
+          - runner: macos-latest
+            rid: osx-arm64
+          - runner: ubuntu-latest
+            rid: linux-x64
+          - runner: ubuntu-latest
+            rid: linux-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Test managed install on host OS
+        run: dotnet test tests/Symphony.Integration.Tests/Symphony.Integration.Tests.csproj -warnaserror --filter FullyQualifiedName~ManagedInstallTests
+      - name: Publish and verify target RID
+        shell: pwsh
+        run: |
+          $target = Join-Path $PWD 'artifacts/managed-rid/${{ matrix.rid }}'
+          dotnet publish src/Symphony.Host/Symphony.Host.csproj --configuration Release --runtime '${{ matrix.rid }}' --self-contained true -warnaserror --output $target
+          $executable = if ($IsWindows) { 'Symphony.exe' } else { 'Symphony' }
+          if (-not (Test-Path (Join-Path $target $executable))) { throw 'Published executable missing.' }
