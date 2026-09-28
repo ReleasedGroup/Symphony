@@ -62,6 +62,7 @@ public sealed class OrchestrationTickServiceTests
                 BuildWorkflowDefinition(1), tracker,
                 new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning), managed);
 
+            Assert.False(await harness.Service.RunStartupCleanupAsync(CancellationToken.None));
             await harness.Service.RunTickAsync(CancellationToken.None);
             Assert.False(tracker.FetchCandidateIssuesCalled);
             Assert.Empty(harness.Coordinator.StartRequests);
@@ -75,6 +76,7 @@ public sealed class OrchestrationTickServiceTests
                 new ManagedLeaseRequest("logical-1", "generation-1", 1, issued, expiry, signature),
                 CancellationToken.None)).Accepted);
 
+            Assert.True(await harness.Service.RunStartupCleanupAsync(CancellationToken.None));
             await harness.Service.RunTickAsync(CancellationToken.None);
             Assert.True(tracker.FetchCandidateIssuesCalled);
             Assert.Single(harness.Coordinator.StartRequests);

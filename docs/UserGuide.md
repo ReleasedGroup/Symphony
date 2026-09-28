@@ -118,6 +118,7 @@ provide `ManagedLease:InstanceId`, `ManagedLease:GenerationId`, and
 `ManagedLease:SigningKeyReference=$ENV_VAR`. The referenced environment variable must contain
 at least 32 characters and be available under the Symphony service account. Managed mode
 starts without dispatch permission, even if SQLite contains a lease from a previous process.
+Startup terminal cleanup waits for a current lease and runs when the worker next wakes.
 
 The device-local supervisor forwards a backplane-issued lease to
 `PUT /api/v1/management/lease` as JSON with `instanceId`, `generationId`, `epoch`,
