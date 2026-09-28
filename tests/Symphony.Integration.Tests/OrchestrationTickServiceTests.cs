@@ -19,6 +19,27 @@ public sealed class OrchestrationTickServiceTests
 {
     [Fact]
     [Trait("Spec", "17.4")]
+    public async Task CancellationAfterStart_ShouldKeepRunAndAttemptDurable()
+    {
+        using var cancellation = new CancellationTokenSource();
+        await using var harness = await TestHarness.CreateAsync(
+            BuildWorkflowDefinition(1),
+            new FakeTrackerClient([BuildIssue("issue-1", "#1", "Open", null)]),
+            new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning,
+                onStart: cancellation.Cancel));
+
+        await harness.Service.RunTickAsync(cancellation.Token);
+
+        var options = new DbContextOptionsBuilder<SymphonyDbContext>()
+            .UseSqlite(harness.DbContext.Database.GetConnectionString()).Options;
+        await using var freshContext = new SymphonyDbContext(options);
+        Assert.Equal(RunStatusNames.Running, (await freshContext.Runs.SingleAsync()).Status);
+        Assert.Equal(RunStatusNames.Running, (await freshContext.RunAttempts.SingleAsync()).Status);
+        Assert.Equal("active", (await freshContext.DispatchClaims.SingleAsync()).Status);
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
     public async Task ManagedPause_ShouldSurviveRestartAndPreservePendingRetry()
     {
         var tracker = new FakeTrackerClient([BuildIssue("issue-1", "#1", "Open", null)]);
@@ -889,7 +910,8 @@ public sealed class OrchestrationTickServiceTests
     private sealed class FakeIssueExecutionCoordinator(
         FakeDispatchOutcome outcome,
         bool stopReturnsFalse = false,
-        bool observeStopStateWithFreshContext = false) : IIssueExecutionCoordinator
+        bool observeStopStateWithFreshContext = false,
+        Action? onStart = null) : IIssueExecutionCoordinator
     {
         private SymphonyDbContext? dbContext;
         private string? dbPath;
@@ -907,6 +929,7 @@ public sealed class OrchestrationTickServiceTests
         public async Task<bool> TryStartAsync(IssueExecutionRequest request, CancellationToken cancellationToken = default)
         {
             StartRequests.Add(request);
+            onStart?.Invoke();
             if (dbContext is null || outcome == FakeDispatchOutcome.LeaveRunning)
             {
                 return true;

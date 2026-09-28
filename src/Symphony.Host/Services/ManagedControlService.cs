@@ -59,9 +59,17 @@ public sealed class ManagedControlService(
     {
         var status = await SetPausedAsync(true, cancellationToken);
         var deadline = timeProvider.GetUtcNow().Add(timeout);
-        while (!status.Quiescent && timeProvider.GetUtcNow() < deadline)
+        while (!status.Quiescent)
         {
-            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+            var remaining = deadline - timeProvider.GetUtcNow();
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            await Task.Delay(remaining < TimeSpan.FromMilliseconds(100)
+                ? remaining
+                : TimeSpan.FromMilliseconds(100), cancellationToken);
             status = await GetStatusAsync(cancellationToken);
         }
 
