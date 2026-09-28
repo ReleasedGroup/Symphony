@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using System.Text.RegularExpressions;
 using Symphony.Core.Configuration;
 using Symphony.Core.Metadata;
 using Symphony.Host.Services;
@@ -133,6 +134,13 @@ internal static class SymphonyHostApplication
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
+        services
+            .AddOptions<ManagedLeaseOptions>()
+            .Bind(configuration.GetSection(ManagedLeaseOptions.SectionName))
+            .ValidateDataAnnotations()
+            .Validate(ValidateManagedLeaseOptions, "Managed lease settings or signing key reference are invalid.")
+            .ValidateOnStart();
+
         services.AddSymphonySqlitePersistence(configuration);
         services.AddSymphonyWorkflowServices(configuration);
         services.AddSymphonyGitHubTrackerClient();
@@ -140,6 +148,8 @@ internal static class SymphonyHostApplication
         services.AddSymphonyWorkspaceServices();
         services.AddSingleton<IIssueExecutionCoordinator, IssueExecutionCoordinator>();
         services.AddSingleton<RefreshSignalService>();
+        services.AddSingleton<ManagedLeaseRuntime>();
+        services.AddScoped<ManagedLeaseService>();
         services.AddScoped<OrchestrationTickService>();
         services.AddScoped<ManagedControlService>();
         services.AddScoped<RuntimeStateService>();
@@ -149,6 +159,7 @@ internal static class SymphonyHostApplication
             .AddDbContextCheck<SymphonyDbContext>("sqlite");
 
         services.AddHostedService<OrchestratorWorker>();
+        services.AddHostedService<ManagedLeaseMonitor>();
     }
 
     private static async Task ApplyHttpPortConfigurationAsync(
@@ -457,9 +468,45 @@ internal static class SymphonyHostApplication
             RefreshSignalService refreshSignal,
             CancellationToken cancellationToken) =>
         {
-            var status = await control.SetPausedAsync(false, cancellationToken);
-            refreshSignal.RequestRefresh();
-            return Results.Ok(status);
+            try
+            {
+                var status = await control.SetPausedAsync(false, cancellationToken);
+                refreshSignal.RequestRefresh();
+                return Results.Ok(status);
+            }
+            catch (ManagedLeaseDeniedException ex)
+            {
+                return Results.Conflict(new { error = new
+                {
+                    code = "lease_required",
+                    reason = ex.Reason,
+                    message = "A current managed dispatch lease is required to resume."
+                } });
+            }
+        });
+
+        app.MapPut("/api/v1/management/lease", async (
+            ManagedLeaseRequest request,
+            ManagedLeaseService leaseService,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await leaseService.RenewAsync(request, cancellationToken);
+            if (result.Accepted)
+            {
+                return Results.Ok(result.Decision);
+            }
+
+            var error = new { error = new
+            {
+                code = result.ErrorCode,
+                message = "Managed lease renewal was rejected."
+            } };
+            return result.ErrorCode switch
+            {
+                "invalid_signature" => Results.Json(error, statusCode: StatusCodes.Status403Forbidden),
+                "invalid_lease" => Results.BadRequest(error),
+                _ => Results.Conflict(error)
+            };
         });
 
         app.MapPost("/api/v1/management/drain", async (
@@ -527,6 +574,27 @@ internal static class SymphonyHostApplication
     private static bool ValidateRuntimeOptions(SymphonyRuntimeOptions options)
     {
         return options.Polling.IntervalMs >= 1_000 && options.Agent.MaxConcurrentAgents > 0;
+    }
+
+    private static bool ValidateManagedLeaseOptions(ManagedLeaseOptions options)
+    {
+        if (!options.Enabled)
+        {
+            return true;
+        }
+
+        if (options.InstanceId is null ||
+            options.GenerationId is null ||
+            options.SigningKeyReference is null ||
+            !Regex.IsMatch(options.InstanceId, @"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$") ||
+            !Regex.IsMatch(options.GenerationId, @"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$") ||
+            !Regex.IsMatch(options.SigningKeyReference, @"^\$[A-Za-z_][A-Za-z0-9_]*$"))
+        {
+            return false;
+        }
+
+        var key = Environment.GetEnvironmentVariable(options.SigningKeyReference[1..]);
+        return key is { Length: >= 32 };
     }
 
     private static async Task ValidateWorkflowDispatchPreflightAsync(

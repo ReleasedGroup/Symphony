@@ -111,6 +111,28 @@ Symphony exposes these HTTP endpoints:
 
 Pause, drain, resume, and status are idempotent. A paused host still reconciles existing work and retains pending retries without dispatching them. The pause survives process restart. The management API is intended for a device-local supervisor over loopback; do not expose the unauthenticated host port directly to a network.
 
+### Managed dispatch lease
+
+For backplane-managed instances, set `ManagedLease:Enabled=true` in host configuration and
+provide `ManagedLease:InstanceId`, `ManagedLease:GenerationId`, and
+`ManagedLease:SigningKeyReference=$ENV_VAR`. The referenced environment variable must contain
+at least 32 characters and be available under the Symphony service account. Managed mode
+starts without dispatch permission, even if SQLite contains a lease from a previous process.
+
+The device-local supervisor forwards a backplane-issued lease to
+`PUT /api/v1/management/lease` as JSON with `instanceId`, `generationId`, `epoch`,
+`issuedAtUtc`, `expiresAtUtc`, and base64 `signature`. The signature is HMAC-SHA256 over the
+UTF-8 string `instanceId\ngenerationId\nepoch\nissuedUnixMilliseconds\nexpiresUnixMilliseconds`,
+using the key referenced in configuration. The default maximum lease is 60 seconds with a
+5-second conservative clock-skew allowance. The backplane must keep leases for an execution
+scope exclusive across generations. It must let the old generation's lease expire or prove it
+fenced before issuing a replacement lease.
+
+Status includes `currentEpoch`, `leaseExpiresAtUtc`, and `dispatchDeniedReason`. A valid
+renewal is idempotent; stale epochs and wrong generations are rejected. Lease expiry blocks
+new dispatch and cancels active Codex process trees without waiting for a poll or network
+response. Resume also requires a valid lease in managed mode.
+
 The state and issue endpoints are derived from persisted orchestrator state in SQLite rather than ad hoc in-memory caches.
 Dashboard and `/api/v1/state` token totals are derived from absolute Codex usage snapshots such as `thread/tokenUsage/updated` and `total_token_usage`. Delta-only payloads like `last_token_usage`, and generic `usage` maps on ordinary notifications or turn events, are ignored to avoid double-counting, so totals only advance when Codex emits a new absolute snapshot.
 For human-readable dashboard surfaces, fallback-only `other_message` protocol entries are suppressed when Codex did not emit a useful message; the durable SQLite event log remains available for deeper debugging.

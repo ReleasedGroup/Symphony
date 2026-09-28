@@ -16,6 +16,7 @@ public sealed class SymphonyDbContext(DbContextOptions<SymphonyDbContext> option
     public DbSet<WorkspaceRecordEntity> WorkspaceRecords => Set<WorkspaceRecordEntity>();
     public DbSet<EventLogEntity> EventLog => Set<EventLogEntity>();
     public DbSet<ManagementControlEntity> ManagementControl => Set<ManagementControlEntity>();
+    public DbSet<ManagedLeaseEntity> ManagedLease => Set<ManagedLeaseEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -26,6 +27,17 @@ public sealed class SymphonyDbContext(DbContextOptions<SymphonyDbContext> option
             entity.Property(x => x.Paused).IsRequired();
             entity.Property(x => x.UpdatedAtUtc).IsRequired();
             entity.HasData(new ManagementControlEntity());
+        });
+
+        modelBuilder.Entity<ManagedLeaseEntity>(entity =>
+        {
+            entity.ToTable("managed_lease");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.InstanceId).HasMaxLength(200);
+            entity.Property(x => x.GenerationId).HasMaxLength(200);
+            entity.Property(x => x.CurrentEpoch).IsRequired();
+            entity.Property(x => x.UpdatedAtUtc).IsRequired();
+            entity.HasData(new ManagedLeaseEntity());
         });
 
         modelBuilder.Entity<InstanceLeaseEntity>(entity =>

@@ -113,6 +113,9 @@ public sealed partial class CodexAgentRunner(
             throw new InvalidOperationException($"Failed to start command '{request.Command}'.");
         }
 
+        using var processCancellation = cancellationToken.Register(
+            static state => TryKillProcess((Process)state!, out _), process);
+
         await ReportUpdateAsync(
             onUpdate,
             new AgentRunUpdate(
@@ -221,6 +224,9 @@ public sealed partial class CodexAgentRunner(
         {
             throw new InvalidOperationException($"Failed to start command '{request.Command}'.");
         }
+
+        using var processCancellation = cancellationToken.Register(
+            static state => TryKillProcess((Process)state!, out _), process);
 
         await ReportUpdateAsync(
             onUpdate,

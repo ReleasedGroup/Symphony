@@ -13,6 +13,7 @@ namespace Symphony.Host.Services;
 public sealed class IssueExecutionCoordinator(
     IServiceScopeFactory serviceScopeFactory,
     IHostApplicationLifetime applicationLifetime,
+    ManagedLeaseRuntime managedLeaseRuntime,
     TimeProvider timeProvider,
     ILogger<IssueExecutionCoordinator> logger) : IIssueExecutionCoordinator
 {
@@ -20,14 +21,17 @@ public sealed class IssueExecutionCoordinator(
 
     public Task<bool> TryStartAsync(IssueExecutionRequest request, CancellationToken cancellationToken = default)
     {
-        if (applicationLifetime.ApplicationStopping.IsCancellationRequested || cancellationToken.IsCancellationRequested)
+        if (applicationLifetime.ApplicationStopping.IsCancellationRequested ||
+            cancellationToken.IsCancellationRequested ||
+            !managedLeaseRuntime.GetLocalDecision().Allowed)
         {
             return Task.FromResult(false);
         }
 
         var linkedSource = CancellationTokenSource.CreateLinkedTokenSource(
             applicationLifetime.ApplicationStopping,
-            cancellationToken);
+            cancellationToken,
+            managedLeaseRuntime.GetRunCancellationToken());
 
         if (!_activeRuns.TryAdd(request.Issue.Id, linkedSource))
         {

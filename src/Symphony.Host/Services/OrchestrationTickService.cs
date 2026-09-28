@@ -150,6 +150,15 @@ public sealed partial class OrchestrationTickService
                 return workflowDefinition.Runtime.Polling.IntervalMs;
             }
 
+            var leaseDecision = await managedControlService.GetDispatchDecisionAsync(cancellationToken);
+            if (!leaseDecision.Allowed)
+            {
+                logger.LogWarning(
+                    "Managed dispatch denied. Reason={DeniedReason} Epoch={Epoch}",
+                    leaseDecision.DeniedReason, leaseDecision.Epoch);
+                return workflowDefinition.Runtime.Polling.IntervalMs;
+            }
+
             await DispatchCandidatesAsync(workflowDefinition, apiKey, instanceId, cancellationToken);
             return workflowDefinition.Runtime.Polling.IntervalMs;
         }

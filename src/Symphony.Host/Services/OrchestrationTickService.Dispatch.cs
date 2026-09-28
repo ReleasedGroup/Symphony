@@ -140,7 +140,7 @@ public sealed partial class OrchestrationTickService
         {
             await coordinationStore.ReleaseIssueClaimAsync(
                 issue.Id, instanceId, "paused", cancellationToken);
-            logger.LogInformation("Dispatch denied for {IssueIdentifier} because managed pause is active.", issue.Identifier);
+            logger.LogInformation("Managed dispatch denied for {IssueIdentifier} by the dispatch gate.", issue.Identifier);
             return false;
         }
 

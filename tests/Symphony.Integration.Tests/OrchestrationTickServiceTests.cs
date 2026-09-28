@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -40,6 +42,51 @@ public sealed class OrchestrationTickServiceTests
 
     [Fact]
     [Trait("Spec", "17.4")]
+    public async Task ManagedTick_ShouldRequireCurrentLeaseBeforeFetchingCandidates()
+    {
+        var keyName = $"SYMPHONY_TICK_LEASE_{Guid.NewGuid():N}";
+        var key = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        Environment.SetEnvironmentVariable(keyName, key);
+        try
+        {
+            var managed = new ManagedLeaseOptions
+            {
+                Enabled = true,
+                InstanceId = "logical-1",
+                GenerationId = "generation-1",
+                SigningKeyReference = $"${keyName}",
+                MaxClockSkewSeconds = 0
+            };
+            var tracker = new FakeTrackerClient([BuildIssue("issue-1", "#1", "Open", null)]);
+            await using var harness = await TestHarness.CreateAsync(
+                BuildWorkflowDefinition(1), tracker,
+                new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning), managed);
+
+            await harness.Service.RunTickAsync(CancellationToken.None);
+            Assert.False(tracker.FetchCandidateIssuesCalled);
+            Assert.Empty(harness.Coordinator.StartRequests);
+
+            var issued = DateTimeOffset.UtcNow;
+            var expiry = issued.AddSeconds(30);
+            var payload = $"logical-1\ngeneration-1\n1\n{issued.ToUnixTimeMilliseconds()}\n{expiry.ToUnixTimeMilliseconds()}";
+            var signature = Convert.ToBase64String(HMACSHA256.HashData(
+                Encoding.UTF8.GetBytes(key), Encoding.UTF8.GetBytes(payload)));
+            Assert.True((await harness.LeaseService.RenewAsync(
+                new ManagedLeaseRequest("logical-1", "generation-1", 1, issued, expiry, signature),
+                CancellationToken.None)).Accepted);
+
+            await harness.Service.RunTickAsync(CancellationToken.None);
+            Assert.True(tracker.FetchCandidateIssuesCalled);
+            Assert.Single(harness.Coordinator.StartRequests);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(keyName, null);
+        }
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
     public async Task ManagedPause_ShouldSurviveRestartAndPreservePendingRetry()
     {
         var tracker = new FakeTrackerClient([BuildIssue("issue-1", "#1", "Open", null)]);
@@ -48,7 +95,7 @@ public sealed class OrchestrationTickServiceTests
             new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning));
         await harness.InsertRetryingRunAsync("issue-1", "#1", "Open", "instance-1");
 
-        var control = new ManagedControlService(harness.DbContext, TimeProvider.System);
+        var control = CreateManagedControl(harness.DbContext);
         Assert.True((await control.SetPausedAsync(true, CancellationToken.None)).Paused);
         await harness.Service.RunTickAsync(CancellationToken.None);
 
@@ -60,7 +107,7 @@ public sealed class OrchestrationTickServiceTests
             .UseSqlite(harness.DbContext.Database.GetConnectionString())
             .Options;
         await using var restartedContext = new SymphonyDbContext(options);
-        var restartedControl = new ManagedControlService(restartedContext, TimeProvider.System);
+        var restartedControl = CreateManagedControl(restartedContext);
         var status = await restartedControl.GetStatusAsync(CancellationToken.None);
         Assert.Equal("suspended", status.State);
         Assert.Equal(1, status.PendingRetries);
@@ -79,7 +126,7 @@ public sealed class OrchestrationTickServiceTests
             BuildWorkflowDefinition(1), new FakeTrackerClient([]),
             new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning));
         await harness.InsertRunningRunAsync("issue-1", "#1", "Open", "instance-1");
-        var control = new ManagedControlService(harness.DbContext, TimeProvider.System);
+        var control = CreateManagedControl(harness.DbContext);
 
         var timedOut = await control.DrainAsync(TimeSpan.Zero, CancellationToken.None);
         Assert.Equal("draining", timedOut.State);
@@ -118,7 +165,7 @@ public sealed class OrchestrationTickServiceTests
             .Options;
         await using (var concurrentContext = new SymphonyDbContext(options))
         {
-            var control = new ManagedControlService(concurrentContext, TimeProvider.System);
+            var control = CreateManagedControl(concurrentContext);
             Assert.True((await control.SetPausedAsync(true, CancellationToken.None)).Paused);
         }
 
@@ -151,6 +198,8 @@ public sealed class OrchestrationTickServiceTests
             var builder = Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder();
             builder.Services.AddDbContext<SymphonyDbContext>(options => options.UseSqlite($"Data Source={Path.Combine(root, "test.db")};Pooling=False"));
             builder.Services.AddSingleton(TimeProvider.System);
+            builder.Services.AddSingleton(Options.Create(new ManagedLeaseOptions()));
+            builder.Services.AddSingleton<ManagedLeaseRuntime>();
             builder.Services.AddScoped<IOrchestrationCoordinationStore, OrchestrationCoordinationStore>();
             builder.Services.AddSingleton<ITrackerClient>(new FakeTrackerClient([], new Dictionary<string, string> { ["issue-1"] = refreshedState }, matchesFilters, refreshFails));
             builder.Services.AddSingleton<IWorkspaceManager>(new PreparedWorkspaceManager(root));
@@ -596,6 +645,14 @@ public sealed class OrchestrationTickServiceTests
             DateTimeOffset.UtcNow);
     }
 
+    private static ManagedControlService CreateManagedControl(SymphonyDbContext dbContext)
+    {
+        var options = Options.Create(new ManagedLeaseOptions());
+        var runtime = new ManagedLeaseRuntime(options, TimeProvider.System);
+        var leaseService = new ManagedLeaseService(dbContext, options, runtime, TimeProvider.System);
+        return new ManagedControlService(dbContext, TimeProvider.System, leaseService);
+    }
+
     private sealed class TestHarness : IAsyncDisposable
     {
         private readonly string dbPath;
@@ -606,7 +663,9 @@ public sealed class OrchestrationTickServiceTests
             FakeTrackerClient tracker,
             FakeWorkspaceManager workspaceManager,
             FakeIssueExecutionCoordinator coordinator,
-            OrchestrationTickService service)
+            OrchestrationTickService service,
+            ManagedLeaseService leaseService,
+            ManagedLeaseRuntime leaseRuntime)
         {
             this.dbPath = dbPath;
             DbContext = dbContext;
@@ -614,6 +673,8 @@ public sealed class OrchestrationTickServiceTests
             WorkspaceManager = workspaceManager;
             Coordinator = coordinator;
             Service = service;
+            LeaseService = leaseService;
+            LeaseRuntime = leaseRuntime;
         }
 
         public SymphonyDbContext DbContext { get; }
@@ -621,11 +682,14 @@ public sealed class OrchestrationTickServiceTests
         public FakeWorkspaceManager WorkspaceManager { get; }
         public FakeIssueExecutionCoordinator Coordinator { get; }
         public OrchestrationTickService Service { get; }
+        public ManagedLeaseService LeaseService { get; }
+        public ManagedLeaseRuntime LeaseRuntime { get; }
 
         public static async Task<TestHarness> CreateAsync(
             WorkflowDefinition workflowDefinition,
             FakeTrackerClient tracker,
-            FakeIssueExecutionCoordinator coordinator)
+            FakeIssueExecutionCoordinator coordinator,
+            ManagedLeaseOptions? managedLeaseOptions = null)
         {
             var dbPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-orchestration.db");
             var options = new DbContextOptionsBuilder<SymphonyDbContext>()
@@ -638,6 +702,9 @@ public sealed class OrchestrationTickServiceTests
 
             var workspaceManager = new FakeWorkspaceManager();
             coordinator.Attach(dbContext, dbPath);
+            var managedOptions = Options.Create(managedLeaseOptions ?? new ManagedLeaseOptions());
+            var leaseRuntime = new ManagedLeaseRuntime(managedOptions, TimeProvider.System);
+            var leaseService = new ManagedLeaseService(dbContext, managedOptions, leaseRuntime, TimeProvider.System);
 
             var service = new OrchestrationTickService(
                 new FakeWorkflowDefinitionProvider(workflowDefinition),
@@ -646,7 +713,7 @@ public sealed class OrchestrationTickServiceTests
                 dbContext,
                 workspaceManager,
                 coordinator,
-                new ManagedControlService(dbContext, TimeProvider.System),
+                new ManagedControlService(dbContext, TimeProvider.System, leaseService),
                 Options.Create(new OrchestrationOptions
                 {
                     InstanceId = "instance-1",
@@ -656,7 +723,8 @@ public sealed class OrchestrationTickServiceTests
                 TimeProvider.System,
                 NullLogger<OrchestrationTickService>.Instance);
 
-            return new TestHarness(dbPath, dbContext, tracker, workspaceManager, coordinator, service);
+            return new TestHarness(dbPath, dbContext, tracker, workspaceManager, coordinator,
+                service, leaseService, leaseRuntime);
         }
 
         public async Task InsertRunningRunAsync(
@@ -806,6 +874,7 @@ public sealed class OrchestrationTickServiceTests
 
         public async ValueTask DisposeAsync()
         {
+            LeaseRuntime.Dispose();
             await DbContext.DisposeAsync();
             TryDeleteFile(dbPath);
             TryDeleteFile($"{dbPath}-wal");
