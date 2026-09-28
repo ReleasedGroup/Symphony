@@ -430,6 +430,86 @@ public sealed class CodexAgentRunnerTests
     }
 
     [Fact]
+    public async Task RunIssueAsync_ShouldFailImmediatelyWhenCompletedTurnHasFailedStatus()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return;
+        }
+
+        var tracker = new SequencedTrackerClient(["Open", "Open", "Open"]);
+        var runner = CreateRunner(tracker);
+        using var harness = CreateAppServerHarness(FailedCompletionScript());
+        var updates = new List<AgentRunUpdate>();
+        var result = await runner.RunIssueAsync(
+            CreateRequest("id-failed", "#failed", harness.WorkspacePath, harness.Command,
+                30_000, maxTurns: 3, trackerQuery: CreateTrackerQuery()),
+            (update, _) => { updates.Add(update); return Task.CompletedTask; });
+
+        Assert.False(result.Success);
+        Assert.Equal("turn_failed", result.ErrorCode);
+        Assert.Contains("model unavailable", result.Stderr, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(updates, update => update.EventType == "turn_failed");
+        Assert.Equal(0, tracker.RefreshCount);
+        Assert.Equal(1, CountOccurrences(result.Stdout, "\"turn/completed\""));
+    }
+
+    [Fact]
+    public async Task RunIssueAsync_ShouldTreatInterruptedCompletionAsCancellation()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return;
+        }
+
+        var runner = CreateRunner();
+        using var harness = CreateAppServerHarness(FailedCompletionScript()
+            .Replace("status = 'failed'", "status = 'interrupted'", StringComparison.Ordinal));
+        var result = await runner.RunIssueAsync(
+            CreateRequest("id-interrupted", "#interrupted", harness.WorkspacePath, harness.Command, 30_000));
+
+        Assert.False(result.Success);
+        Assert.Equal("turn_cancelled", result.ErrorCode);
+    }
+
+    [Fact]
+    public void CodexModelSelector_ShouldUseAccountDefaultWhenSelectedModelIsUnavailable()
+    {
+        using var catalog = JsonDocument.Parse("""
+            {"result":{"data":[{"id":"gpt-6-astra","isDefault":true,"hidden":false},
+            {"id":"gpt-5.5","isDefault":false,"hidden":false}],"nextCursor":null}}
+            """);
+        Assert.Equal("gpt-6-astra", CodexModelSelector.SelectOverride(catalog.RootElement, "gpt-6-sol"));
+        Assert.Null(CodexModelSelector.SelectOverride(catalog.RootElement, "gpt-5.5"));
+    }
+
+    [RealCodexCliFact]
+    public async Task RunIssueAsync_ShouldCompleteWithInstalledCodexCli_WhenEnabled()
+    {
+        var workspace = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"symphony-real-codex-{Guid.NewGuid():N}"));
+        try
+        {
+            var updates = new List<AgentRunUpdate>();
+            var runner = CreateRunner();
+            var request = CreateRequest("real-codex", "#real-codex", workspace.FullName,
+                "codex app-server", 120_000) with
+            {
+                Prompt = "Reply exactly OK. Do not run tools or change files."
+            };
+            var result = await runner.RunIssueAsync(request,
+                (update, _) => { updates.Add(update); return Task.CompletedTask; });
+
+            Assert.True(result.Success, result.Stderr);
+            Assert.Contains(updates, update => update.EventType == "turn_completed");
+            Assert.Contains(updates, update => update.TotalTokens > 0 || update.InputTokens > 0);
+        }
+        finally
+        {
+            Directory.Delete(workspace.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunIssueAsync_ShouldExtractTokenCountsFromThreadTokenUsageUpdatedPayloads()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -562,6 +642,21 @@ public sealed class CodexAgentRunnerTests
                 $turnIndex++
                 @{ id = $request.id; result = @{ turn = @{ id = "turn-$turnIndex" } } } | ConvertTo-Json -Compress
                 @{ method = 'turn/completed'; params = @{ message = "turn-$turnIndex done"; usage = @{ input_tokens = $turnIndex; output_tokens = $turnIndex; total_tokens = ($turnIndex * 2) } } } | ConvertTo-Json -Compress
+                continue
+            }
+            if ($request.method -eq 'shutdown') { @{ id = $request.id; result = @{ ok = $true } } | ConvertTo-Json -Compress; break }
+        }
+        """;
+
+    private static string FailedCompletionScript() => """
+        while (($line = [Console]::In.ReadLine()) -ne $null) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $request = $line | ConvertFrom-Json
+            if ($request.method -eq 'initialize') { @{ id = $request.id; result = @{} } | ConvertTo-Json -Compress; continue }
+            if ($request.method -eq 'thread/start') { @{ id = $request.id; result = @{ thread = @{ id = 'thread-1' } } } | ConvertTo-Json -Compress; continue }
+            if ($request.method -eq 'turn/start') {
+                @{ id = $request.id; result = @{ turn = @{ id = 'turn-1' } } } | ConvertTo-Json -Compress
+                @{ method = 'turn/completed'; params = @{ turn = @{ id = 'turn-1'; status = 'failed'; error = @{ message = 'model unavailable' } } } } | ConvertTo-Json -Compress -Depth 8
                 continue
             }
             if ($request.method -eq 'shutdown') { @{ id = $request.id; result = @{ ok = $true } } | ConvertTo-Json -Compress; break }
@@ -727,5 +822,16 @@ public sealed class CodexAgentRunnerTests
 
         Assert.NotNull(method);
         return Assert.IsType<AgentRunUpdate>(method!.Invoke(null, [document.RootElement, eventName, null, null, null]));
+    }
+}
+
+internal sealed class RealCodexCliFactAttribute : FactAttribute
+{
+    public RealCodexCliFactAttribute()
+    {
+        if (!string.Equals(Environment.GetEnvironmentVariable("SYMPHONY_RUN_REAL_CODEX_TESTS"), "1", StringComparison.Ordinal))
+        {
+            Skip = "Set SYMPHONY_RUN_REAL_CODEX_TESTS=1 to test the installed Codex CLI and authenticated account.";
+        }
     }
 }

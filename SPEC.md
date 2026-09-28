@@ -1015,7 +1015,8 @@ The client reads line-delimited messages until the turn terminates.
 
 Completion conditions:
 
-- `turn/completed` -> success
+- `turn/completed` with `turn.status = completed` -> success
+- `turn/completed` with `turn.status = failed` or `interrupted` -> failure
 - `turn/failed` -> failure
 - `turn/cancelled` -> failure
 - turn timeout (`turn_timeout_ms`) -> failure
@@ -2058,6 +2059,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   app-server protocol
 - Policy-related startup payloads use the implementation's documented approval/sandbox settings
 - `thread/start` and `turn/start` parse nested IDs and emit `session_started`
+- For the installed Codex CLI, account model discovery selects the account's default model
+  when the configured model is absent from the available catalog
+- `turn/completed` with a failed or interrupted turn status ends the attempt as a failure;
+  it must not start a continuation turn
 - Request/response read timeout is enforced
 - Turn timeout is enforced
 - Partial JSON lines are buffered until newline
