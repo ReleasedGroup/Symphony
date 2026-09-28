@@ -577,6 +577,86 @@ public sealed class WorkflowLoaderTests
         }
     }
 
+    [Fact]
+    public async Task WorkflowEditorService_ShouldRejectStaleConcurrentSave()
+    {
+        var path = CreateWorkflowPath();
+        await File.WriteAllTextAsync(path, "---\ntracker:\n  kind: github\n  api_key: secret-value\n  owner: released\n  repo: symphony\n---\nPrompt A\n");
+        try
+        {
+            var editorA = CreateEditorService(path);
+            var editorB = CreateEditorService(path);
+            var first = await editorA.GetCurrentAsync();
+            var second = await editorB.GetCurrentAsync();
+            var saved = await editorA.SaveAsync(first with { PromptTemplate = "Prompt B" });
+
+            Assert.NotEqual(first.ContentRevision, saved.ContentRevision);
+            var conflict = await Assert.ThrowsAsync<WorkflowEditorConflictException>(() =>
+                editorB.SaveAsync(second with { PromptTemplate = "Prompt C" }));
+            Assert.Equal(second.ContentRevision, conflict.ExpectedRevision);
+            Assert.Equal(saved.ContentRevision, conflict.CurrentRevision);
+            Assert.Contains("Prompt B", await File.ReadAllTextAsync(path), StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete(path + ".edit.lock");
+        }
+    }
+
+    [Fact]
+    public async Task WorkflowEditorService_ShouldValidateWithoutWritingAndMaskSecrets()
+    {
+        var path = CreateWorkflowPath();
+        const string secret = "inline-secret-never-return";
+        var original = "---\ntracker:\n  kind: github\n  api_key: " + secret + "\n  owner: released\n  repo: symphony\ncustom_secret: hidden-value\n---\nPrompt A\n";
+        await File.WriteAllTextAsync(path, original);
+        try
+        {
+            var editor = CreateEditorService(path);
+            var document = await editor.GetCurrentAsync();
+            Assert.DoesNotContain(secret, document.FrontMatterText, StringComparison.Ordinal);
+            Assert.DoesNotContain("hidden-value", document.FrontMatterText, StringComparison.Ordinal);
+            var invalid = document with { PromptTemplate = "{{ if }}" };
+            var validation = await editor.ValidateAsync(invalid);
+            Assert.False(validation.Valid);
+            Assert.NotNull(validation.Error);
+            Assert.DoesNotContain(secret, validation.Error!.Message, StringComparison.Ordinal);
+            await Assert.ThrowsAsync<WorkflowLoadException>(() => editor.SaveAsync(invalid));
+            Assert.Equal(original, await File.ReadAllTextAsync(path));
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete(path + ".edit.lock");
+        }
+    }
+
+    [Fact]
+    public async Task WorkflowEditorService_ShouldShowLastGoodRevisionAfterInvalidReload()
+    {
+        var path = CreateWorkflowPath();
+        await File.WriteAllTextAsync(path, "---\ntracker:\n  kind: github\n  api_key: original-secret\n  owner: released\n  repo: symphony\n---\nPrompt A\n");
+        using var provider = CreateProvider(path);
+        try
+        {
+            var original = await provider.GetCurrentAsync();
+            await File.WriteAllTextAsync(path, "---\ntracker: [\napi_key: exposed-secret\n---\nPrompt B\n");
+            var editor = new WorkflowEditorService(new WorkflowLoader(),
+                Options.Create(new WorkflowLoaderOptions { Path = path }), provider);
+            var document = await editor.GetCurrentAsync();
+            Assert.Equal(original.ContentRevision, document.EffectiveLoadedRevision);
+            Assert.NotEqual(document.ContentRevision, document.EffectiveLoadedRevision);
+            Assert.NotNull(document.ValidationError);
+            Assert.DoesNotContain("exposed-secret", document.FrontMatterText, StringComparison.Ordinal);
+            Assert.DoesNotContain("exposed-secret", document.ValidationError!.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     private static string CreateWorkflowPath()
     {
         return Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-workflow.md");

@@ -7,8 +7,17 @@ public sealed record WorkflowEditorDocument(
     string PromptTemplate,
     bool HasMaskedTrackerApiKey,
     string TrackerApiKeyPlaceholder,
-    WorkflowEditorValidationError? ValidationError);
+    WorkflowEditorValidationError? ValidationError,
+    string? ContentRevision = null,
+    string? EffectiveLoadedRevision = null,
+    string? ExpectedRevision = null);
 
 public sealed record WorkflowEditorValidationError(
     string Code,
     string Message);
+
+public sealed record WorkflowEditorValidationResult(
+    bool Valid,
+    WorkflowEditorValidationError? Error,
+    string ContentRevision,
+    string? EffectiveLoadedRevision);

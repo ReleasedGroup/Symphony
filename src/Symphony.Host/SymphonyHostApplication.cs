@@ -303,9 +303,9 @@ internal static class SymphonyHostApplication
                     }
                 };
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                workflowError = ex.Message;
+                workflowError = "Workflow load failed. Review the workflow configuration.";
             }
 
             return Results.Ok(new
@@ -352,7 +352,7 @@ internal static class SymphonyHostApplication
                     error = new
                     {
                         code = ex.Code,
-                        message = ex.Message
+                        message = "Workflow operation failed. Review the workflow configuration and prompt syntax."
                     }
                 });
             }
@@ -368,6 +368,49 @@ internal static class SymphonyHostApplication
                 var payload = await workflowEditorService.SaveAsync(document, cancellationToken);
                 return Results.Ok(payload);
             }
+            catch (WorkflowEditorConflictException ex)
+            {
+                return Results.Conflict(new
+                {
+                    error = new
+                    {
+                        code = "workflow_revision_conflict",
+                        message = "Workflow content changed since it was loaded.",
+                        ex.ExpectedRevision,
+                        ex.CurrentRevision
+                    }
+                });
+            }
+            catch (WorkflowLoadException ex)
+            {
+                if (ex.Code == "missing_workflow_revision")
+                {
+                    return Results.Json(new
+                    {
+                        error = new { code = ex.Code, message = "A workflow revision is required to save." }
+                    }, statusCode: 428);
+                }
+
+                return Results.BadRequest(new
+                {
+                    error = new
+                    {
+                        code = ex.Code,
+                        message = "Workflow operation failed. Review the workflow configuration and prompt syntax."
+                    }
+                });
+            }
+        });
+
+        app.MapPost("/api/v1/workflow/validate", async (
+            WorkflowEditorDocument document,
+            WorkflowEditorService workflowEditorService,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                return Results.Ok(await workflowEditorService.ValidateAsync(document, cancellationToken));
+            }
             catch (WorkflowLoadException ex)
             {
                 return Results.BadRequest(new
@@ -375,7 +418,7 @@ internal static class SymphonyHostApplication
                     error = new
                     {
                         code = ex.Code,
-                        message = ex.Message
+                        message = "Workflow validation failed. Review the workflow configuration and prompt syntax."
                     }
                 });
             }
