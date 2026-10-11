@@ -93,7 +93,7 @@ public sealed partial class OrchestrationTickService
 
         try
         {
-            await RunStartupCleanupCoreAsync(workflowDefinition, apiKey, cancellationToken);
+            await RunStartupCleanupCoreAsync(workflowDefinition, apiKey, instanceId, cancellationToken);
             return true;
         }
         finally

@@ -279,22 +279,35 @@ public sealed class IssueExecutionCoordinator(
 
                     if (cleanupWorkspace)
                     {
-                        await workspaceManager.CleanupIssueWorkspaceAsync(
-                            new WorkspaceCleanupRequest(
-                                request.Issue.Identifier,
-                                request.WorkflowDefinition.Runtime.Workspace.Root,
-                                request.WorkflowDefinition.Runtime.Workspace.SharedClonePath,
-                                request.WorkflowDefinition.Runtime.Workspace.WorktreesRoot,
-                                request.WorkflowDefinition.Runtime.Hooks.BeforeRemove,
-                                request.WorkflowDefinition.Runtime.Hooks.TimeoutMs),
-                            CancellationToken.None);
+                        try
+                        {
+                            var cleanupResult = await workspaceManager.CleanupIssueWorkspaceAsync(
+                                new WorkspaceCleanupRequest(
+                                    request.Issue.Identifier,
+                                    request.WorkflowDefinition.Runtime.Workspace.Root,
+                                    request.WorkflowDefinition.Runtime.Workspace.SharedClonePath,
+                                    request.WorkflowDefinition.Runtime.Workspace.WorktreesRoot,
+                                    request.WorkflowDefinition.Runtime.Hooks.BeforeRemove,
+                                    request.WorkflowDefinition.Runtime.Hooks.TimeoutMs),
+                                CancellationToken.None);
 
-                        await UpdateWorkspaceCleanupAsync(
-                            dbContext,
-                            request.Issue,
-                            RunStopReasons.Terminal,
-                            timeProvider.GetUtcNow(),
-                            CancellationToken.None);
+                            if (!cleanupResult.Existed || cleanupResult.RemovedNow)
+                            {
+                                await UpdateWorkspaceCleanupAsync(
+                                    dbContext,
+                                    request.Issue,
+                                    RunStopReasons.Terminal,
+                                    timeProvider.GetUtcNow(),
+                                    CancellationToken.None);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            // Finalize and release the run even when removal fails. The
+                            // terminal sweep retains its records and retries next tick.
+                            logger.LogWarning(ex, "terminal_issue_cleanup_failed for {IssueId} {IssueIdentifier}; cleanup will retry.",
+                                request.Issue.Id, request.Issue.Identifier);
+                        }
                     }
 
                     if (finalStatus is not null)

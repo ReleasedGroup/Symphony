@@ -72,6 +72,7 @@ Build the Symphony service from `SPEC.md` as a long-running orchestrator that:
 - Shared repository clone root plus per-issue worktree management.
 - Lifecycle hooks: `after_create`, `before_run`, `after_run`, `before_remove`.
 - Startup terminal cleanup.
+- Terminal retention (SPEC 8.7): prune closed-issue cache, run/attempt/session history, retries, claims, workspace records, and correlated events after worker finalization and successful workspace removal. Sweep legacy state at startup and polling; retain issue-free lifetime accounting atomically with deletion and retry failed cleanup.
 
 6. Agent Runner (`SPEC.md` section 10)
 - Launch `codex.command` as subprocess.
@@ -87,7 +88,7 @@ Build the Symphony service from `SPEC.md` as a long-running orchestrator that:
 
 8. Observability and API (`SPEC.md` section 13)
 - Structured logs with issue/session correlation.
-- In-memory snapshot + SQLite-backed history.
+- In-memory snapshot + SQLite-backed history for retained issues, with constant-size accounting for pruned terminal runs.
 - `/api/v1/*` endpoints included in v1 for runtime status.
 
 9. Failure + Security (`SPEC.md` sections 14-15)

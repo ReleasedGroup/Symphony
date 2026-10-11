@@ -205,8 +205,17 @@ Symphony stores durable operational data in SQLite:
 - workspace records
 - event log
 - leases and dispatch claims
+- a single row of aggregate accounting for pruned runs
 
 Issue/session-related diagnostics include `issue_id`, `issue_identifier`, and `session_id` where applicable. Token-bearing auth strings and common PAT formats are redacted from persisted diagnostics.
+
+When GitHub confirms a configured terminal state (`Closed` by default), Symphony removes the issue's worktree and all of its issue-specific SQLite records: cached details, runs, attempts, sessions, retries, dispatch claims, workspace records, and events correlated by issue, run, attempt, or session. This runs at startup and on each polling cycle, including for older history that no longer has a cache row. A running worker must finish before records are deleted, and another live instance's work is preserved. Failed or incomplete workspace removal keeps recovery records and retries cleanup on a later tick; tracker errors or missing results do not authorize deletion. Pausing dispatch still allows cleanup.
+
+After cleanup the issue no longer appears in tracked counts, recent activity, or per-issue drill-down; `GET /api/v1/{issueIdentifier}` returns `404`. Lifetime tokens, runtime seconds, and the latest rate-limit snapshot remain available through the dashboard and state API, using one accounting row with no issue identifiers. Reopening an eligible GitHub issue lets Symphony discover it afresh. GitHub remains the history source; cleanup does not change GitHub issues, PRs, or repository refs, and does not rewrite external operational logs or shared workflow configuration.
+
+The schema migration adds the accounting table automatically at startup. SQLite reuses pages freed by deletion, so row counts and future polling work shrink without running a blocking `VACUUM` during dispatch. The database file may retain its previous allocated size. Back up the database before an upgrade if you need to retain closed-issue diagnostics: successfully pruned history is not recoverable from a migration rollback.
+
+Cleanup uses a durable `cleanup` dispatch claim to reserve the affected issue while hooks and filesystem operations run. Other issues can continue writing state during removal. A failed/interrupted cleanup retains that reservation until a later cleanup succeeds or the tracker confirms the issue is eligible again. Upgrade all instances sharing a database together: older versions do not understand cleanup reservations.
 
 ## Testing
 
