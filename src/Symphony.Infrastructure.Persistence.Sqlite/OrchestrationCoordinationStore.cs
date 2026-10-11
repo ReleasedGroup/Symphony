@@ -95,6 +95,12 @@ public sealed class OrchestrationCoordinationStore(
         var nowUtc = timeProvider.GetUtcNow();
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
 
+        if (await dbContext.HasLiveWorkerForIssueAsync(issueId, nowUtc, cancellationToken))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return false;
+        }
+
         var activeClaim = await dbContext.DispatchClaims
             .SingleOrDefaultAsync(item => item.IssueId == issueId &&
                 (item.Status == "active" || item.Status == "cleanup"), cancellationToken);

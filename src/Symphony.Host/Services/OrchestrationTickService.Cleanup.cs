@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Symphony.Core.Models;
+using Symphony.Infrastructure.Persistence.Sqlite;
 using Symphony.Infrastructure.Persistence.Sqlite.Entities;
 using Symphony.Infrastructure.Workflows.Models;
 
@@ -21,7 +22,8 @@ public sealed partial class OrchestrationTickService
         await using (var reservation = await dbContext.Database.BeginTransactionAsync(cancellationToken))
         {
             if (await dbContext.Runs.AnyAsync(
-                    run => run.IssueId == issueId && run.Status == RunStatusNames.Running, cancellationToken))
+                    run => run.IssueId == issueId && run.Status == RunStatusNames.Running, cancellationToken) ||
+                await dbContext.HasLiveWorkerForIssueAsync(issueId, timeProvider.GetUtcNow(), cancellationToken))
             {
                 return;
             }
@@ -90,7 +92,8 @@ public sealed partial class OrchestrationTickService
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         if (!await dbContext.DispatchClaims.AnyAsync(claim => claim.IssueId == issueId &&
                 claim.Status == "cleanup" && claim.ClaimedByInstanceId == instanceId, cancellationToken) ||
-            await dbContext.Runs.AnyAsync(run => run.IssueId == issueId && run.Status == RunStatusNames.Running, cancellationToken))
+            await dbContext.Runs.AnyAsync(run => run.IssueId == issueId && run.Status == RunStatusNames.Running, cancellationToken) ||
+            await dbContext.HasLiveWorkerForIssueAsync(issueId, timeProvider.GetUtcNow(), cancellationToken))
         {
             return;
         }
@@ -140,6 +143,12 @@ public sealed partial class OrchestrationTickService
         await dbContext.RetryQueue.Where(entry => entry.IssueId == issueId).ExecuteDeleteAsync(cancellationToken);
         await dbContext.DispatchClaims.Where(entry => entry.IssueId == issueId).ExecuteDeleteAsync(cancellationToken);
         await dbContext.WorkspaceRecords.Where(entry => entry.IssueId == issueId).ExecuteDeleteAsync(cancellationToken);
+        foreach (var relatedRunId in relatedRunIds)
+        {
+            var workerLeasePrefix = WorkerLeaseNames.ForRun(relatedRunId);
+            await dbContext.InstanceLeases.Where(lease => lease.LeaseName.StartsWith(workerLeasePrefix))
+                .ExecuteDeleteAsync(cancellationToken);
+        }
         await dbContext.Runs.Where(run => run.IssueId == issueId).ExecuteDeleteAsync(cancellationToken);
         await dbContext.IssueCache.Where(entry => entry.IssueId == issueId).ExecuteDeleteAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
@@ -155,6 +164,7 @@ public sealed partial class OrchestrationTickService
                 RetryQueueEntity retry => retry.IssueId == issueId,
                 WorkspaceRecordEntity workspace => workspace.IssueId == issueId,
                 DispatchClaimEntity claim => claim.IssueId == issueId,
+                InstanceLeaseEntity lease => relatedRunIds.Any(runId => lease.LeaseName.StartsWith(WorkerLeaseNames.ForRun(runId), StringComparison.Ordinal)),
                 EventLogEntity log => log.IssueId == issueId || log.IssueIdentifier == identifier ||
                     relatedRunIds.Contains(log.RunId ?? "") || relatedAttemptIds.Contains(log.RunAttemptId ?? "") ||
                     relatedSessionIds.Contains(log.SessionId ?? ""),

@@ -172,7 +172,8 @@ public sealed partial class OrchestrationTickService
             .Union(dbContext.WorkspaceRecords.Select(record => new { record.IssueId, Identifier = record.IssueIdentifier }))
             .Union(dbContext.DispatchClaims.Select(claim => new { claim.IssueId, Identifier = claim.IssueIdentifier }))
             .Union(dbContext.RetryQueue.Select(retry => new { retry.IssueId, Identifier = retry.IssueIdentifier }))
-            .Union(dbContext.EventLog.Where(entry => entry.IssueId != null && entry.IssueIdentifier != null)
+            .Union(dbContext.RunAttempts.Select(attempt => new { attempt.IssueId, Identifier = (string)null! }))
+            .Union(dbContext.EventLog.Where(entry => entry.IssueId != null)
                 .Select(entry => new { IssueId = entry.IssueId!, Identifier = entry.IssueIdentifier! }))
             .ToListAsync(cancellationToken);
         if (trackedIssues.Count == 0)
@@ -198,9 +199,10 @@ public sealed partial class OrchestrationTickService
         var hasChanges = false;
         var refreshedAtUtc = timeProvider.GetUtcNow();
 
-        foreach (var trackedIssue in trackedIssues)
+        foreach (var trackedGroup in trackedIssues.GroupBy(issue => issue.IssueId, StringComparer.OrdinalIgnoreCase))
         {
-            if (!refreshedById.TryGetValue(trackedIssue.IssueId, out var refreshedState))
+            var issueId = trackedGroup.Key;
+            if (!refreshedById.TryGetValue(issueId, out var refreshedState))
             {
                 continue;
             }
@@ -209,7 +211,7 @@ public sealed partial class OrchestrationTickService
                 refreshedState.State,
                 workflowDefinition.Runtime.Tracker.TerminalStates);
 
-            cachedById.TryGetValue(trackedIssue.IssueId, out var cachedIssue);
+            cachedById.TryGetValue(issueId, out var cachedIssue);
             if (cachedIssue is not null && !string.Equals(cachedIssue.State, refreshedState.State, StringComparison.OrdinalIgnoreCase))
             {
                 cachedIssue.State = refreshedState.State;
@@ -219,13 +221,21 @@ public sealed partial class OrchestrationTickService
 
             if (isTerminal)
             {
-                await CleanupTerminalIssueAsync(trackedIssue.IssueId, trackedIssue.Identifier,
-                    workflowDefinition, instanceId, cancellationToken);
+                var identifier = refreshedState.Identifier ?? trackedGroup
+                    .Select(issue => issue.Identifier).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+                if (string.IsNullOrWhiteSpace(identifier))
+                {
+                    // Never invent a workspace path from an opaque GitHub node ID.
+                    logger.LogWarning("terminal_issue_cleanup_deferred: tracker identifier missing for {IssueId}.", issueId);
+                    continue;
+                }
+
+                await CleanupTerminalIssueAsync(issueId, identifier, workflowDefinition, instanceId, cancellationToken);
             }
-            else if (cleanupIssueIds.Contains(trackedIssue.IssueId) &&
+            else if (cleanupIssueIds.Contains(issueId) &&
                 refreshedState.IsExecutionEligible(workflowDefinition.Runtime.Tracker.ActiveStates))
             {
-                await ReleaseReopenedCleanupReservationAsync(trackedIssue.IssueId, instanceId, cancellationToken);
+                await ReleaseReopenedCleanupReservationAsync(issueId, instanceId, cancellationToken);
             }
         }
 

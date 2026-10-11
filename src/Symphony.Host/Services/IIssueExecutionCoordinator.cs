@@ -16,4 +16,6 @@ public sealed record IssueExecutionRequest(
     string InstanceId,
     int? Attempt,
     NormalizedIssue Issue,
-    WorkflowDefinition WorkflowDefinition);
+    WorkflowDefinition WorkflowDefinition,
+    TimeSpan? WorkerLeaseTtl = null,
+    Task? DispatchCommitted = null);

@@ -240,9 +240,14 @@ public sealed partial class OrchestrationTickServiceTests
             await using var scope = host.Services.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<SymphonyDbContext>();
             await db.Database.EnsureCreatedAsync();
-            db.Runs.Add(new RunEntity { Id = "run-1", IssueId = "issue-1", IssueIdentifier = "#1", State = "Open", Status = RunStatusNames.Running });
+            db.Runs.Add(new RunEntity { Id = "run-1", IssueId = "issue-1", IssueIdentifier = "#1", State = "Open", Status = RunStatusNames.Running, OwnerInstanceId = "instance-1" });
             db.RunAttempts.Add(new RunAttemptEntity { Id = "attempt-1", RunId = "run-1", IssueId = "issue-1", Status = RunStatusNames.Running });
             db.DispatchClaims.Add(new DispatchClaimEntity { IssueId = "issue-1", IssueIdentifier = "#1", ClaimedByInstanceId = "instance-1" });
+            db.InstanceLeases.Add(new InstanceLeaseEntity
+            {
+                LeaseName = WorkerLeaseNames.ForAttempt("run-1", "attempt-1"), OwnerInstanceId = "instance-1",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(15)
+            });
             await db.SaveChangesAsync();
             var coordinator = host.Services.GetRequiredService<IssueExecutionCoordinator>();
             var request = new IssueExecutionRequest("run-1", "attempt-1", "instance-1", null, BuildIssue("issue-1", "#1", "Open", null), workflow);
@@ -949,7 +954,8 @@ public sealed partial class OrchestrationTickServiceTests
         IReadOnlyDictionary<string, string>? issueStatesById = null,
         bool matchesCandidateFilters = true,
         bool refreshFails = false,
-        Func<CancellationToken, Task>? beforeReturnCandidates = null) : IGitHubTrackerClient
+        Func<CancellationToken, Task>? beforeReturnCandidates = null,
+        IReadOnlyDictionary<string, string>? identifiersById = null) : IGitHubTrackerClient
     {
         private readonly Dictionary<string, string> statesById = issueStatesById is null
             ? new(StringComparer.OrdinalIgnoreCase)
@@ -983,7 +989,8 @@ public sealed partial class OrchestrationTickServiceTests
 
             var snapshots = issueIds
                 .Where(id => statesById.ContainsKey(id))
-                .Select(id => new IssueStateSnapshot(id, statesById[id], matchesCandidateFilters))
+                .Select(id => new IssueStateSnapshot(id, statesById[id], matchesCandidateFilters,
+                    identifiersById?.GetValueOrDefault(id)))
                 .ToList();
             return Task.FromResult<IReadOnlyList<IssueStateSnapshot>>(snapshots);
         }
@@ -1105,6 +1112,13 @@ public sealed partial class OrchestrationTickServiceTests
                 });
             }
 
+            var workerLeaseName = WorkerLeaseNames.ForAttempt(request.RunId, request.AttemptId);
+            var workerLease = await dbContext.InstanceLeases.SingleOrDefaultAsync(
+                row => row.LeaseName == workerLeaseName, cancellationToken);
+            if (workerLease is not null)
+            {
+                dbContext.InstanceLeases.Remove(workerLease);
+            }
             await dbContext.SaveChangesAsync(cancellationToken);
             return true;
         }

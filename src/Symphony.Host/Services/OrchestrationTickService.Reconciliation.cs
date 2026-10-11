@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Symphony.Core.Models;
+using Symphony.Infrastructure.Persistence.Sqlite;
 using Symphony.Infrastructure.Persistence.Sqlite.Entities;
 using Symphony.Infrastructure.Workflows.Models;
 
@@ -12,6 +13,8 @@ public sealed partial class OrchestrationTickService
         WorkflowDefinition workflowDefinition,
         CancellationToken cancellationToken)
     {
+        // Serialize the liveness check and takeover with heartbeat renewal.
+        await using var recovery = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         var nowUtc = timeProvider.GetUtcNow();
         var leaseName = ResolveLeaseName();
         var liveLeaseOwners = (await dbContext.InstanceLeases
@@ -30,7 +33,8 @@ public sealed partial class OrchestrationTickService
 
         foreach (var run in orphanedRuns)
         {
-            if (liveOwnerSet.Contains(run.OwnerInstanceId))
+            if (liveOwnerSet.Contains(run.OwnerInstanceId) ||
+                await dbContext.HasLiveWorkerForRunAsync(run.Id, nowUtc, cancellationToken))
             {
                 continue;
             }
@@ -101,6 +105,7 @@ public sealed partial class OrchestrationTickService
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await recovery.CommitAsync(cancellationToken);
     }
 
     private async Task ReconcileRunningIssuesAsync(
@@ -220,6 +225,13 @@ public sealed partial class OrchestrationTickService
         run.LastEventAtUtc = timeProvider.GetUtcNow();
 
         await dbContext.SaveChangesAsync(cancellationToken);
+
+        if (!run.OwnerInstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase) &&
+            await dbContext.HasLiveWorkerForRunAsync(run.Id, timeProvider.GetUtcNow(), cancellationToken))
+        {
+            // The foreign worker observes this persisted stop request via its heartbeat.
+            return;
+        }
 
         if (!run.OwnerInstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase))
         {

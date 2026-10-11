@@ -102,6 +102,7 @@ Build the Symphony service from `SPEC.md` as a long-running orchestrator that:
 - Add DB-backed lease/lock for poll-dispatch ownership.
 - Prevent duplicate dispatch across instances.
 - Add heartbeat and lease expiry for failover.
+- Reserve and renew per-attempt worker leases independently of poll leases, through finalization; honor them during recovery, claims, and cleanup, and observe remote stop requests. Refresh ID-only legacy references with repository-scoped GitHub identifiers (SPEC 8.7).
 - Ensure retry queue claiming is atomic.
 
 ## Solution Layout

@@ -72,6 +72,7 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : ITracke
           nodes(ids: $ids) {
             ... on Issue {
               id
+              number
               state
               milestone { title number }
               labels(first: 50) { nodes { name } }
@@ -184,7 +185,8 @@ public sealed partial class GitHubTrackerClient(HttpClient httpClient) : ITracke
                     issueId,
                     normalizedState,
                     MatchesLabels(issue.Labels, query.Labels) &&
-                    MatchesMilestone(issue.Milestone, issueNode, query.Milestone));
+                    MatchesMilestone(issue.Milestone, issueNode, query.Milestone),
+                    GetOptionalInt(issueNode, "number") is > 0 and var number ? $"#{number}" : null);
             }
         }
 

@@ -835,6 +835,15 @@ cover previously retained history, including records without an issue-cache row.
 refresh only retained issues rather than accumulating closed issues indefinitely.
 
 - Wait for running workers to finish finalization before removing their workspace or state.
+- Reserve an attempt-specific worker lifetime lease before launch and renew it independently
+  of polling through hooks, cancellation, workspace cleanup, and final persistence. Release
+  it only after finalization. Recovery, dispatch claims, and terminal cleanup must honor this
+  lease even if the run status changes or the poll lease is released. Serialize recovery with
+  heartbeat renewal; expired worker leases allow failover. Remote workers observe durable
+  stop requests through their heartbeat.
+- Include issue-ID-only legacy events and attempts in polling discovery. Resolve missing
+  issue identifiers from the repository-scoped tracker refresh; defer cleanup when the
+  tracker cannot provide a safe identifier.
 - Preserve active claims/retries owned by another instance with a live lease.
 - Reserve the affected issue durably during workspace removal to prevent concurrent dispatch.
   Hooks and filesystem operations must not hold the database's global write lock. Retain the
@@ -852,7 +861,8 @@ refresh only retained issues rather than accumulating closed issues indefinitely
   restarts cannot double-count pruned work.
 - Pruned issues disappear from tracked summaries and recent activity; per-issue status returns
   not found. An eligible reopened issue can be discovered and dispatched afresh.
-- Cleanup continues while dispatch is paused. Shared workflow configuration, instance leases,
+- Cleanup continues while dispatch is paused. Expired worker leases belonging to pruned runs
+  are deleted with their history. Shared workflow configuration, poll/management leases,
   GitHub data/repository refs, and external operational logging retain their existing lifecycle.
 
 SQLite implementations may reuse freed database pages rather than compacting the database file
@@ -2128,6 +2138,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Terminal cleanup prunes all issue-correlated operational state only after worker finalization and successful/absent workspace removal; unrelated open issues and live foreign owners are preserved
 - Failed/incomplete cleanup and cancellation retain recovery records; failed/missing tracker refreshes do not prune
 - Startup and polling prune legacy history without cache rows; repeated cleanup/restarts preserve aggregate accounting exactly once
+- Worker leases survive poll-lease release, renew through finalization, prevent foreign takeover/cleanup even for retrying rows, observe remote stops, and permit recovery after expiry
+- ID-only legacy events refresh during polling, use tracker-provided identifiers for cleanup, disappear after pruning, and remain retained on open/missing/failed refreshes or absent identifiers
 - Closed issues leave the polling set, dashboard activity, and per-issue status; reopened eligible issues can dispatch afresh
 - Reconciliation with no running issues is a no-op
 - Normal worker exit schedules a short continuation retry (attempt 1)

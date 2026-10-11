@@ -126,6 +126,7 @@ public sealed partial class OrchestrationTickServiceTests
             db.Runs.Add(new RunEntity
             {
                 Id = "run-1", IssueId = "issue-1", IssueIdentifier = "#1", State = "Closed",
+                OwnerInstanceId = "instance-1",
                 Status = RunStatusNames.Running, RequestedStopReason = RunStopReasons.Terminal, CleanupWorkspaceOnStop = true
             });
             db.RunAttempts.Add(new RunAttemptEntity
@@ -135,6 +136,11 @@ public sealed partial class OrchestrationTickServiceTests
             db.DispatchClaims.Add(new DispatchClaimEntity
             {
                 IssueId = "issue-1", IssueIdentifier = "#1", ClaimedByInstanceId = "instance-1"
+            });
+            db.InstanceLeases.Add(new InstanceLeaseEntity
+            {
+                LeaseName = WorkerLeaseNames.ForAttempt("run-1", "attempt-1"), OwnerInstanceId = "instance-1",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(15)
             });
             await db.SaveChangesAsync();
             var coordinator = host.Services.GetRequiredService<IssueExecutionCoordinator>();

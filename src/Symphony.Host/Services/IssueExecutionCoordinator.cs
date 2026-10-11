@@ -39,7 +39,23 @@ public sealed class IssueExecutionCoordinator(
             return Task.FromResult(false);
         }
 
-        _ = Task.Run(() => ExecuteRunAsync(request, linkedSource), CancellationToken.None);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (request.DispatchCommitted is not null)
+                {
+                    await request.DispatchCommitted;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                _activeRuns.TryRemove(request.Issue.Id, out _);
+                linkedSource.Dispose();
+                return;
+            }
+            await ExecuteRunAsync(request, linkedSource);
+        }, CancellationToken.None);
         return Task.FromResult(true);
     }
 
@@ -64,9 +80,12 @@ public sealed class IssueExecutionCoordinator(
         bool releaseClaim = false;
         var releaseStatus = RunStatusNames.Failed;
         var cleanupWorkspace = false;
+        WorkerLeaseHeartbeat? workerLeaseHeartbeat = null;
 
         try
         {
+            workerLeaseHeartbeat = await WorkerLeaseHeartbeat.StartAsync(
+                serviceScopeFactory, request, timeProvider, cancellationSource, logger);
             await using var scope = serviceScopeFactory.CreateAsyncScope();
             var workspaceManager = scope.ServiceProvider.GetRequiredService<IWorkspaceManager>();
             var workspaceHookRunner = scope.ServiceProvider.GetRequiredService<IWorkspaceHookRunner>();
@@ -345,6 +364,20 @@ public sealed class IssueExecutionCoordinator(
                 logger.LogError(ex, "Failed finalizing run state for issue {IssueIdentifier}.", request.Issue.Identifier);
             }
 
+            try
+            {
+                if (workerLeaseHeartbeat is not null)
+                {
+                    await workerLeaseHeartbeat.DisposeAsync();
+                }
+
+                await WorkerLeaseHeartbeat.ReleaseAsync(serviceScopeFactory, request);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "worker_lease_release_failed for {IssueId} {RunId}.", request.Issue.Id, request.RunId);
+            }
+
             _activeRuns.TryRemove(request.Issue.Id, out _);
             cancellationSource.Dispose();
         }
@@ -359,7 +392,7 @@ public sealed class IssueExecutionCoordinator(
         var dbContext = scope.ServiceProvider.GetRequiredService<SymphonyDbContext>();
 
         var run = await dbContext.Runs.SingleOrDefaultAsync(runEntity => runEntity.Id == request.RunId, cancellationToken);
-        if (run is null)
+        if (run is null || run.OwnerInstanceId != request.InstanceId)
         {
             return;
         }
@@ -467,7 +500,13 @@ public sealed class IssueExecutionCoordinator(
     {
         var completedAtUtc = timeProvider.GetUtcNow();
 
-        var run = await dbContext.Runs.SingleAsync(runEntity => runEntity.Id == request.RunId, cancellationToken);
+        var run = await dbContext.Runs.SingleOrDefaultAsync(runEntity => runEntity.Id == request.RunId &&
+            runEntity.OwnerInstanceId == request.InstanceId, cancellationToken);
+        if (run is null)
+        {
+            logger.LogWarning("worker_finalization_fenced for {IssueId} {RunId}; ownership changed.", request.Issue.Id, request.RunId);
+            return;
+        }
         var attempt = await dbContext.RunAttempts.SingleAsync(attemptEntity => attemptEntity.Id == request.AttemptId, cancellationToken);
 
         attempt.Status = finalStatus;
