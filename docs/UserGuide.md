@@ -30,6 +30,7 @@ if ([string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) { throw "GITHUB_TOKEN is no
 ```
 
 2. Edit [`WORKFLOW.md`](../WORKFLOW.md) with your GitHub owner/repo and any label or milestone filters.
+   If your hooks, Git credential helper, or agent commands use GitHub CLI (`gh`), complete the [GitHub CLI authentication prerequisite](#github-cli-authentication-prerequisite) before dispatching work.
 3. Restore tools and build:
 
 ```powershell
@@ -62,6 +63,27 @@ http://127.0.0.1:<port>/api/v1/health
 ```
 
 If you are starting from a GitHub Release bundle instead of source, use [PackageGuide.md](PackageGuide.md) for the interactive installer flow.
+
+### GitHub CLI authentication prerequisite
+
+Install GitHub CLI (`gh`) when your workflow uses it, and check authentication under the same OS account and in the same environment that runs Symphony's hooks and Codex commands:
+
+```sh
+gh auth status
+```
+
+If authentication is missing or invalid, complete the interactive login locally, then verify it:
+
+```sh
+gh auth login
+gh auth status
+```
+
+For WSL deployments, run these commands inside the WSL distribution and Linux account running Symphony; a Windows login does not establish authentication there. Service and container deployments likewise need authentication available to their execution account and environment. Complete any interactive login before unattended jobs run.
+
+Symphony's `tracker.api_key` authenticates its own GitHub API requests and the `github_graphql` tool. A successful API response (including HTTP 200) does not verify authentication for a separate `gh` invocation. GitHub CLI can use its own stored login or a supported token environment variable, such as `GH_TOKEN` or `GITHUB_TOKEN`, inherited by that process; an existing valid environment-based setup does not also require interactive login. Verify with `gh auth status` without printing token values.
+
+The checked-in workflow has `after_create` and `before_run` set to `null`; Symphony does not universally require `gh` for dispatch. This prerequisite applies when your configured hooks, Git credential helper, or agent commands depend on it. Git clone/fetch access and Codex login must also work in that environment.
 
 ## Workflow Settings
 
@@ -207,6 +229,14 @@ Symphony stores durable operational data in SQLite:
 - leases and dispatch claims
 
 Issue/session-related diagnostics include `issue_id`, `issue_identifier`, and `session_id` where applicable. Token-bearing auth strings and common PAT formats are redacted from persisted diagnostics.
+
+### Dispatched job shows "Session not started" and zero turns/tokens
+
+These symptoms mean no session ID or turn/token activity has been recorded yet; they do not identify a single cause. Symphony prepares the Git workspace and runs configured `after_create` and `before_run` hooks before starting the Codex session. Check the issue's recent events, attempt diagnostics, and host logs to locate the last completed step.
+
+If that path uses `gh` (directly or as a Git credential helper), check `gh auth status` in the execution environment and use `gh auth login` locally if needed, as described above. Missing GitHub CLI authentication was resolved this way in a reported WSL setup using Symphony 0.1.11 and Codex 0.163.0, even though Symphony's configured GitHub API requests returned HTTP 200. It is one possible cause, not a diagnosis for every stalled job. If authentication is valid, investigate Git clone/fetch access, workspace locks, hook failures/timeouts, and Codex startup diagnostics.
+
+A background Codex daemon alone does not establish that a Symphony job is active: Symphony starts an app-server subprocess per worker attempt. Confirm the specific issue's session ID and subsequent activity in the dashboard or `GET /api/v1/<issue_identifier>`, correlated with host logs. Keep credentials out of logs, issue reports, and chat.
 
 ## Testing
 
