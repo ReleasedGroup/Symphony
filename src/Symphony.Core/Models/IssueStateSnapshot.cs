@@ -3,7 +3,8 @@ namespace Symphony.Core.Models;
 public sealed record IssueStateSnapshot(
     string Id,
     string State,
-    bool MatchesCandidateFilters = true)
+    bool MatchesCandidateFilters = true,
+    string? Identifier = null)
 {
     public bool IsExecutionEligible(IReadOnlyList<string> activeStates) =>
         MatchesCandidateFilters && IssueStateMatcher.MatchesConfiguredActiveState(State, activeStates);

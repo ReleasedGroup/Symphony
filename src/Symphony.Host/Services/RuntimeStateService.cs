@@ -13,6 +13,7 @@ public sealed class RuntimeStateService(
     public async Task<object> GetStateAsync(CancellationToken cancellationToken)
     {
         var generatedAt = timeProvider.GetUtcNow();
+        var retiredTotals = await dbContext.RuntimeTotals.AsNoTracking().SingleAsync(cancellationToken);
         var runningRuns = (await dbContext.Runs
             .AsNoTracking()
             .Where(run => run.Status == RunStatusNames.Running)
@@ -27,13 +28,14 @@ public sealed class RuntimeStateService(
         var attempts = await dbContext.RunAttempts
             .AsNoTracking()
             .ToListAsync(cancellationToken);
-        var latestRateLimitsJson = (await dbContext.EventLog
+        var latestRateLimits = await dbContext.EventLog
             .AsNoTracking()
             .Where(entry => entry.EventName == "rate_limits_updated" && entry.DataJson != null)
-            .ToListAsync(cancellationToken))
-            .OrderByDescending(entry => entry.OccurredAtUtc)
-            .Select(entry => entry.DataJson)
-            .FirstOrDefault();
+            .OrderByDescending(entry => entry.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+        var latestRateLimitsJson = latestRateLimits is not null && latestRateLimits.Id > retiredTotals.RateLimitsEventId
+            ? latestRateLimits.DataJson
+            : retiredTotals.RateLimitsJson;
         var issueCacheEntries = (await dbContext.IssueCache
             .AsNoTracking()
             .ToListAsync(cancellationToken))
@@ -53,12 +55,8 @@ public sealed class RuntimeStateService(
         var runningIssueIds = runningRuns.Select(run => run.IssueId).ToHashSet(StringComparer.Ordinal);
         var retryIssueIds = retryEntries.Select(entry => entry.IssueId).ToHashSet(StringComparer.Ordinal);
 
-        var secondsRunning = attempts
-            .Where(attempt => attempt.CompletedAtUtc.HasValue)
-            .Sum(attempt => Math.Max((attempt.CompletedAtUtc!.Value - attempt.StartedAtUtc).TotalSeconds, 0d));
-        secondsRunning += attempts
-            .Where(attempt => attempt.Status == RunStatusNames.Running && attempt.CompletedAtUtc is null)
-            .Sum(attempt => Math.Max((generatedAt - attempt.StartedAtUtc).TotalSeconds, 0d));
+        var secondsRunning = retiredTotals.SecondsRunning + attempts.Sum(attempt =>
+            RunAttemptRuntime.CalculateSeconds(attempt.StartedAtUtc, attempt.CompletedAtUtc, attempt.Status, generatedAt));
 
         return new
         {
@@ -166,18 +164,18 @@ public sealed class RuntimeStateService(
             },
             codex_totals = new
             {
-                input_tokens = runningRuns.Sum(run => run.InputTokens) + await dbContext.Runs
+                input_tokens = retiredTotals.InputTokens + runningRuns.Sum(run => (long)run.InputTokens) + await dbContext.Runs
                     .AsNoTracking()
                     .Where(run => run.Status != RunStatusNames.Running)
-                    .SumAsync(run => run.InputTokens, cancellationToken),
-                output_tokens = runningRuns.Sum(run => run.OutputTokens) + await dbContext.Runs
+                    .SumAsync(run => (long)run.InputTokens, cancellationToken),
+                output_tokens = retiredTotals.OutputTokens + runningRuns.Sum(run => (long)run.OutputTokens) + await dbContext.Runs
                     .AsNoTracking()
                     .Where(run => run.Status != RunStatusNames.Running)
-                    .SumAsync(run => run.OutputTokens, cancellationToken),
-                total_tokens = runningRuns.Sum(run => run.TotalTokens) + await dbContext.Runs
+                    .SumAsync(run => (long)run.OutputTokens, cancellationToken),
+                total_tokens = retiredTotals.TotalTokens + runningRuns.Sum(run => (long)run.TotalTokens) + await dbContext.Runs
                     .AsNoTracking()
                     .Where(run => run.Status != RunStatusNames.Running)
-                    .SumAsync(run => run.TotalTokens, cancellationToken),
+                    .SumAsync(run => (long)run.TotalTokens, cancellationToken),
                 seconds_running = Math.Round(secondsRunning, 3)
             },
             rate_limits = ParseJsonValue(latestRateLimitsJson)

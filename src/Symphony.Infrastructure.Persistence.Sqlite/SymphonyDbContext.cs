@@ -17,9 +17,17 @@ public sealed class SymphonyDbContext(DbContextOptions<SymphonyDbContext> option
     public DbSet<EventLogEntity> EventLog => Set<EventLogEntity>();
     public DbSet<ManagementControlEntity> ManagementControl => Set<ManagementControlEntity>();
     public DbSet<ManagedLeaseEntity> ManagedLease => Set<ManagedLeaseEntity>();
+    public DbSet<RuntimeTotalsEntity> RuntimeTotals => Set<RuntimeTotalsEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<RuntimeTotalsEntity>(entity =>
+        {
+            entity.ToTable("runtime_totals");
+            entity.HasKey(x => x.Id);
+            entity.HasData(new RuntimeTotalsEntity());
+        });
+
         modelBuilder.Entity<ManagementControlEntity>(entity =>
         {
             entity.ToTable("management_control");
@@ -68,7 +76,7 @@ public sealed class SymphonyDbContext(DbContextOptions<SymphonyDbContext> option
             entity.HasIndex(x => new { x.IssueId, x.Status });
             entity.HasIndex(x => x.IssueId)
                 .IsUnique()
-                .HasFilter("Status = 'active'");
+                .HasFilter("Status IN ('active', 'cleanup')");
         });
 
         modelBuilder.Entity<WorkflowSnapshotEntity>(entity =>

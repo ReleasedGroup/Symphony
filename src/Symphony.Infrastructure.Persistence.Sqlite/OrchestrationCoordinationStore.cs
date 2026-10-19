@@ -95,11 +95,27 @@ public sealed class OrchestrationCoordinationStore(
         var nowUtc = timeProvider.GetUtcNow();
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
 
+        if (await dbContext.HasLiveWorkerForIssueAsync(issueId, nowUtc, cancellationToken))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return false;
+        }
+
         var activeClaim = await dbContext.DispatchClaims
-            .SingleOrDefaultAsync(item => item.IssueId == issueId && item.Status == "active", cancellationToken);
+            .SingleOrDefaultAsync(item => item.IssueId == issueId &&
+                (item.Status == "active" || item.Status == "cleanup"), cancellationToken);
 
         if (activeClaim is not null)
         {
+            // Cleanup reserves only this issue while hooks/filesystem operations run
+            // outside a SQLite write transaction. It must finish or be released after
+            // confirmed reopening before any instance may dispatch the issue again.
+            if (activeClaim.Status == "cleanup")
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+
             if (activeClaim.ClaimedByInstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase))
             {
                 activeClaim.UpdatedAtUtc = nowUtc;
