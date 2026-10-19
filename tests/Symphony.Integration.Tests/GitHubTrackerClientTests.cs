@@ -330,6 +330,7 @@ public sealed class GitHubTrackerClientTests
                 "nodes": [
                   {
                     "id": "I_100",
+                    "number": 100,
                     "state": "OPEN",
                     "repository": {
                       "name": "symphony",
@@ -338,6 +339,7 @@ public sealed class GitHubTrackerClientTests
                   },
                   {
                     "id": "I_200",
+                    "number": 200,
                     "state": "CLOSED",
                     "repository": {
                       "name": "symphony",
@@ -380,11 +382,13 @@ public sealed class GitHubTrackerClientTests
             {
                 Assert.Equal("I_200", state.Id);
                 Assert.Equal("Closed", state.State);
+                Assert.Equal("#200", state.Identifier);
             },
             state =>
             {
                 Assert.Equal("I_100", state.Id);
                 Assert.Equal("Open", state.State);
+                Assert.Equal("#100", state.Identifier);
             });
     }
 

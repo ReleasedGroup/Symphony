@@ -224,16 +224,48 @@ public sealed partial class OrchestrationTickService
         var started = false;
         if (startGate is not null)
         {
-            started = await issueExecutionCoordinator.TryStartAsync(
-                new IssueExecutionRequest(
-                    run.Id,
-                    runAttempt.Id,
-                    instanceId,
-                    attempt,
-                    issue,
-                    workflowDefinition),
-                CancellationToken.None);
-            await startGate.CommitAsync(CancellationToken.None);
+            // Reserve worker liveness before the coordinator can launch and before
+            // the short poll lease is released. This lease is renewed for the entire
+            // attempt, including hooks and final persistence.
+            var workerLeaseTtl = TimeSpan.FromSeconds(Math.Max(orchestrationOptions.LeaseTtlSeconds,
+                workflowDefinition.Runtime.Hooks.TimeoutMs / 1000d * 3 + 60));
+            var workerLease = new InstanceLeaseEntity
+            {
+                LeaseName = WorkerLeaseNames.ForAttempt(run.Id, runAttempt.Id),
+                OwnerInstanceId = instanceId,
+                AcquiredAtUtc = timeProvider.GetUtcNow(),
+                UpdatedAtUtc = timeProvider.GetUtcNow(),
+                ExpiresAtUtc = timeProvider.GetUtcNow().Add(workerLeaseTtl)
+            };
+            dbContext.InstanceLeases.Add(workerLease);
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+            var dispatchCommitted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            try
+            {
+                started = await issueExecutionCoordinator.TryStartAsync(
+                    new IssueExecutionRequest(
+                        run.Id,
+                        runAttempt.Id,
+                        instanceId,
+                        attempt,
+                        issue,
+                        workflowDefinition,
+                        workerLeaseTtl,
+                        dispatchCommitted.Task),
+                    CancellationToken.None);
+                if (!started)
+                {
+                    dbContext.InstanceLeases.Remove(workerLease);
+                    await dbContext.SaveChangesAsync(CancellationToken.None);
+                }
+                await startGate.CommitAsync(CancellationToken.None);
+                dispatchCommitted.SetResult();
+            }
+            finally
+            {
+                // A failed commit must never launch work against an uncommitted lease.
+                dispatchCommitted.TrySetCanceled();
+            }
         }
 
         if (!started)

@@ -13,6 +13,7 @@ public sealed partial class OrchestrationTickService
     private async Task RunStartupCleanupCoreAsync(
         WorkflowDefinition workflowDefinition,
         string apiKey,
+        string instanceId,
         CancellationToken cancellationToken)
     {
         var terminalStates = workflowDefinition.Runtime.Tracker.TerminalStates;
@@ -43,23 +44,40 @@ public sealed partial class OrchestrationTickService
             return;
         }
 
+        var retainedIds = (await dbContext.IssueCache.Select(issue => issue.IssueId)
+            .Union(dbContext.Runs.Select(run => run.IssueId))
+            .Union(dbContext.RunAttempts.Select(attempt => attempt.IssueId))
+            .Union(dbContext.WorkspaceRecords.Select(workspace => workspace.IssueId))
+            .Union(dbContext.DispatchClaims.Select(claim => claim.IssueId))
+            .Union(dbContext.RetryQueue.Select(retry => retry.IssueId))
+            .Union(dbContext.EventLog.Where(entry => entry.IssueId != null).Select(entry => entry.IssueId!))
+            .ToListAsync(cancellationToken)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var legacyEventIdentifiers = (await dbContext.EventLog
+            .Where(entry => entry.IssueId == null && entry.IssueIdentifier != null)
+            .Select(entry => entry.IssueIdentifier!).Distinct().ToListAsync(cancellationToken))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         foreach (var issue in terminalIssues)
         {
             try
             {
-                var cleanupResult = await workspaceManager.CleanupIssueWorkspaceAsync(
-                    new WorkspaceCleanupRequest(
-                        issue.Identifier,
-                        workflowDefinition.Runtime.Workspace.Root,
-                        workflowDefinition.Runtime.Workspace.SharedClonePath,
-                        workflowDefinition.Runtime.Workspace.WorktreesRoot,
-                        workflowDefinition.Runtime.Hooks.BeforeRemove,
-                        workflowDefinition.Runtime.Hooks.TimeoutMs),
-                    cancellationToken);
-
-                if (cleanupResult.RemovedNow)
+                if (retainedIds.Contains(issue.Id) || legacyEventIdentifiers.Contains(issue.Identifier))
                 {
-                    await UpdateWorkspaceCleanupRecordAsync(issue, RunStopReasons.Terminal, cancellationToken);
+                    await CleanupTerminalIssueAsync(issue.Id, issue.Identifier, workflowDefinition, instanceId, cancellationToken);
+                }
+                else
+                {
+                    // Most terminal GitHub issues have already been forgotten locally.
+                    // Sweep any leftover directory without opening a deletion transaction
+                    // or rewriting lifetime accounting for every historical issue.
+                    var result = await workspaceManager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest(
+                        issue.Identifier, workflowDefinition.Runtime.Workspace.Root,
+                        workflowDefinition.Runtime.Workspace.SharedClonePath, workflowDefinition.Runtime.Workspace.WorktreesRoot,
+                        workflowDefinition.Runtime.Hooks.BeforeRemove, workflowDefinition.Runtime.Hooks.TimeoutMs), cancellationToken);
+                    if (result.Existed && !result.RemovedNow)
+                    {
+                        await UpsertIssueCacheAsync([issue], cancellationToken);
+                    }
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -69,6 +87,12 @@ public sealed partial class OrchestrationTickService
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Startup terminal cleanup failed for issue {IssueIdentifier}.", issue.Identifier);
+                if (!retainedIds.Contains(issue.Id) && !legacyEventIdentifiers.Contains(issue.Identifier))
+                {
+                    // A worktree can outlive its state after a crash during preparation.
+                    // Remember failed startup removal so normal ticks retry it too.
+                    await UpsertIssueCacheAsync([issue], cancellationToken);
+                }
             }
         }
     }
@@ -141,7 +165,18 @@ public sealed partial class OrchestrationTickService
         CancellationToken cancellationToken)
     {
         var cachedIssues = await dbContext.IssueCache.ToListAsync(cancellationToken);
-        if (cachedIssues.Count == 0)
+        // Include legacy/partial state without a cache row, including work left behind
+        // while a live worker was finishing terminal reconciliation.
+        var trackedIssues = await dbContext.IssueCache.Select(issue => new { issue.IssueId, issue.Identifier })
+            .Union(dbContext.Runs.Select(run => new { run.IssueId, Identifier = run.IssueIdentifier }))
+            .Union(dbContext.WorkspaceRecords.Select(record => new { record.IssueId, Identifier = record.IssueIdentifier }))
+            .Union(dbContext.DispatchClaims.Select(claim => new { claim.IssueId, Identifier = claim.IssueIdentifier }))
+            .Union(dbContext.RetryQueue.Select(retry => new { retry.IssueId, Identifier = retry.IssueIdentifier }))
+            .Union(dbContext.RunAttempts.Select(attempt => new { attempt.IssueId, Identifier = (string)null! }))
+            .Union(dbContext.EventLog.Where(entry => entry.IssueId != null)
+                .Select(entry => new { IssueId = entry.IssueId!, Identifier = entry.IssueIdentifier! }))
+            .ToListAsync(cancellationToken);
+        if (trackedIssues.Count == 0)
         {
             return;
         }
@@ -149,7 +184,7 @@ public sealed partial class OrchestrationTickService
         var refreshedStates = await TryFetchIssueStatesByIdsAsync(
             workflowDefinition,
             apiKey,
-            cachedIssues.Select(issue => issue.IssueId).ToList(),
+            trackedIssues.Select(issue => issue.IssueId).Distinct().ToList(),
             "Tracked issue cache state refresh failed; dashboard issue-state summaries may be stale.",
             cancellationToken);
         if (refreshedStates is null)
@@ -158,12 +193,16 @@ public sealed partial class OrchestrationTickService
         }
 
         var refreshedById = refreshedStates.ToDictionary(state => state.Id, StringComparer.OrdinalIgnoreCase);
+        var cachedById = cachedIssues.ToDictionary(issue => issue.IssueId, StringComparer.OrdinalIgnoreCase);
+        var cleanupIssueIds = (await dbContext.DispatchClaims.Where(claim => claim.Status == "cleanup")
+            .Select(claim => claim.IssueId).ToListAsync(cancellationToken)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var hasChanges = false;
         var refreshedAtUtc = timeProvider.GetUtcNow();
 
-        foreach (var cachedIssue in cachedIssues)
+        foreach (var trackedGroup in trackedIssues.GroupBy(issue => issue.IssueId, StringComparer.OrdinalIgnoreCase))
         {
-            if (!refreshedById.TryGetValue(cachedIssue.IssueId, out var refreshedState))
+            var issueId = trackedGroup.Key;
+            if (!refreshedById.TryGetValue(issueId, out var refreshedState))
             {
                 continue;
             }
@@ -172,7 +211,8 @@ public sealed partial class OrchestrationTickService
                 refreshedState.State,
                 workflowDefinition.Runtime.Tracker.TerminalStates);
 
-            if (!string.Equals(cachedIssue.State, refreshedState.State, StringComparison.OrdinalIgnoreCase))
+            cachedById.TryGetValue(issueId, out var cachedIssue);
+            if (cachedIssue is not null && !string.Equals(cachedIssue.State, refreshedState.State, StringComparison.OrdinalIgnoreCase))
             {
                 cachedIssue.State = refreshedState.State;
                 cachedIssue.CachedAtUtc = refreshedAtUtc;
@@ -181,77 +221,27 @@ public sealed partial class OrchestrationTickService
 
             if (isTerminal)
             {
-                await CleanupTerminalTrackedIssueWorkspaceAsync(
-                    cachedIssue,
-                    workflowDefinition,
-                    instanceId,
-                    cancellationToken);
+                var identifier = refreshedState.Identifier ?? trackedGroup
+                    .Select(issue => issue.Identifier).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+                if (string.IsNullOrWhiteSpace(identifier))
+                {
+                    // Never invent a workspace path from an opaque GitHub node ID.
+                    logger.LogWarning("terminal_issue_cleanup_deferred: tracker identifier missing for {IssueId}.", issueId);
+                    continue;
+                }
+
+                await CleanupTerminalIssueAsync(issueId, identifier, workflowDefinition, instanceId, cancellationToken);
+            }
+            else if (cleanupIssueIds.Contains(issueId) &&
+                refreshedState.IsExecutionEligible(workflowDefinition.Runtime.Tracker.ActiveStates))
+            {
+                await ReleaseReopenedCleanupReservationAsync(issueId, instanceId, cancellationToken);
             }
         }
 
         if (hasChanges)
         {
             await dbContext.SaveChangesAsync(cancellationToken);
-        }
-    }
-
-    private async Task CleanupTerminalTrackedIssueWorkspaceAsync(
-        IssueCacheEntity cachedIssue,
-        WorkflowDefinition workflowDefinition,
-        string instanceId,
-        CancellationToken cancellationToken)
-    {
-        var hasRunningRun = await dbContext.Runs.AnyAsync(
-            run => run.IssueId == cachedIssue.IssueId && run.Status == RunStatusNames.Running,
-            cancellationToken);
-        if (hasRunningRun)
-        {
-            return;
-        }
-
-        var workspaceRecord = await dbContext.WorkspaceRecords.SingleOrDefaultAsync(
-            record => record.IssueId == cachedIssue.IssueId,
-            cancellationToken);
-
-        var releasedRetryState = await ReleaseTerminalRetryStateAsync(cachedIssue, instanceId, cancellationToken);
-        if (workspaceRecord is null && !releasedRetryState)
-        {
-            return;
-        }
-
-        if (workspaceRecord is not null &&
-            workspaceRecord.LastCleanedAtUtc.HasValue &&
-            string.Equals(workspaceRecord.LastCleanupReason, RunStopReasons.Terminal, StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        try
-        {
-            var cleanupResult = await workspaceManager.CleanupIssueWorkspaceAsync(
-                new WorkspaceCleanupRequest(
-                    cachedIssue.Identifier,
-                    workflowDefinition.Runtime.Workspace.Root,
-                    workflowDefinition.Runtime.Workspace.SharedClonePath,
-                    workflowDefinition.Runtime.Workspace.WorktreesRoot,
-                    workflowDefinition.Runtime.Hooks.BeforeRemove,
-                    workflowDefinition.Runtime.Hooks.TimeoutMs),
-                cancellationToken);
-
-            if (workspaceRecord is not null && (!cleanupResult.Existed || cleanupResult.RemovedNow))
-            {
-                workspaceRecord.LastCleanedAtUtc = timeProvider.GetUtcNow();
-                workspaceRecord.LastCleanupReason = RunStopReasons.Terminal;
-                await dbContext.SaveChangesAsync(cancellationToken);
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Tracked terminal cleanup failed for issue {IssueIdentifier}.", cachedIssue.Identifier);
         }
     }
 
@@ -330,25 +320,6 @@ public sealed partial class OrchestrationTickService
             logger.LogWarning(ex, "{FailureMessage}", failureMessage);
             return null;
         }
-    }
-
-    private async Task UpdateWorkspaceCleanupRecordAsync(
-        NormalizedIssue issue,
-        string reason,
-        CancellationToken cancellationToken)
-    {
-        var record = await dbContext.WorkspaceRecords.SingleOrDefaultAsync(
-            entity => entity.IssueId == issue.Id,
-            cancellationToken);
-
-        if (record is null)
-        {
-            return;
-        }
-
-        record.LastCleanedAtUtc = timeProvider.GetUtcNow();
-        record.LastCleanupReason = reason;
-        await dbContext.SaveChangesAsync(cancellationToken);
     }
 
     private static IssueCacheEntity CreateIssueCacheEntity(NormalizedIssue issue, DateTimeOffset cachedAtUtc)

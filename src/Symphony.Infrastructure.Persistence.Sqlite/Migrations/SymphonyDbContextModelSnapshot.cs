@@ -56,7 +56,7 @@ namespace Symphony.Infrastructure.Persistence.Sqlite.Migrations
 
                     b.HasIndex("IssueId")
                         .IsUnique()
-                        .HasFilter("Status = 'active'");
+                        .HasFilter("Status IN ('active', 'cleanup')");
 
                     b.HasIndex("Status");
 
@@ -488,6 +488,46 @@ namespace Symphony.Infrastructure.Persistence.Sqlite.Migrations
                         .HasFilter("Status IN ('running', 'retrying')");
 
                     b.ToTable("runs", (string)null);
+                });
+
+            modelBuilder.Entity("Symphony.Infrastructure.Persistence.Sqlite.Entities.RuntimeTotalsEntity", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("InputTokens")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("OutputTokens")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("RateLimitsEventId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RateLimitsJson")
+                        .HasColumnType("TEXT");
+
+                    b.Property<double>("SecondsRunning")
+                        .HasColumnType("REAL");
+
+                    b.Property<long>("TotalTokens")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("runtime_totals", (string)null);
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            InputTokens = 0L,
+                            OutputTokens = 0L,
+                            RateLimitsEventId = 0L,
+                            SecondsRunning = 0.0,
+                            TotalTokens = 0L
+                        });
                 });
 
             modelBuilder.Entity("Symphony.Infrastructure.Persistence.Sqlite.Entities.SessionEntity", b =>

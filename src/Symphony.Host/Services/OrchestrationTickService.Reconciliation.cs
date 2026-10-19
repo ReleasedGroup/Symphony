@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Symphony.Core.Models;
+using Symphony.Infrastructure.Persistence.Sqlite;
 using Symphony.Infrastructure.Persistence.Sqlite.Entities;
 using Symphony.Infrastructure.Workflows.Models;
 
@@ -12,6 +13,8 @@ public sealed partial class OrchestrationTickService
         WorkflowDefinition workflowDefinition,
         CancellationToken cancellationToken)
     {
+        // Serialize the liveness check and takeover with heartbeat renewal.
+        await using var recovery = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         var nowUtc = timeProvider.GetUtcNow();
         var leaseName = ResolveLeaseName();
         var liveLeaseOwners = (await dbContext.InstanceLeases
@@ -30,7 +33,8 @@ public sealed partial class OrchestrationTickService
 
         foreach (var run in orphanedRuns)
         {
-            if (liveOwnerSet.Contains(run.OwnerInstanceId))
+            if (liveOwnerSet.Contains(run.OwnerInstanceId) ||
+                await dbContext.HasLiveWorkerForRunAsync(run.Id, nowUtc, cancellationToken))
             {
                 continue;
             }
@@ -101,6 +105,7 @@ public sealed partial class OrchestrationTickService
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await recovery.CommitAsync(cancellationToken);
     }
 
     private async Task ReconcileRunningIssuesAsync(
@@ -221,6 +226,24 @@ public sealed partial class OrchestrationTickService
 
         await dbContext.SaveChangesAsync(cancellationToken);
 
+        if (!run.OwnerInstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase) &&
+            await dbContext.HasLiveWorkerForRunAsync(run.Id, timeProvider.GetUtcNow(), cancellationToken))
+        {
+            // The foreign worker observes this persisted stop request via its heartbeat.
+            return;
+        }
+
+        if (!run.OwnerInstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase))
+        {
+            var ownerLeases = await dbContext.InstanceLeases
+                .Where(lease => lease.OwnerInstanceId == run.OwnerInstanceId)
+                .ToListAsync(cancellationToken);
+            if (ownerLeases.Any(lease => lease.ExpiresAtUtc > timeProvider.GetUtcNow()))
+            {
+                return;
+            }
+        }
+
         var stopRequested = await issueExecutionCoordinator.TryStopAsync(run.IssueId, cancellationToken);
         if (stopRequested)
         {
@@ -280,7 +303,9 @@ public sealed partial class OrchestrationTickService
 
             if (cleanupWorkspace)
             {
-                await CleanupWorkspaceWithoutLiveRunAsync(run, cancellationToken);
+                var workflowDefinition = await workflowDefinitionProvider.GetCurrentAsync(cancellationToken);
+                await CleanupTerminalIssueAsync(run.IssueId, run.IssueIdentifier,
+                    workflowDefinition, instanceId, cancellationToken);
             }
         }
     }
@@ -327,43 +352,4 @@ public sealed partial class OrchestrationTickService
         }
     }
 
-    private async Task CleanupWorkspaceWithoutLiveRunAsync(RunEntity run, CancellationToken cancellationToken)
-    {
-        var workflowDefinition = await workflowDefinitionProvider.GetCurrentAsync(cancellationToken);
-        try
-        {
-            await workspaceManager.CleanupIssueWorkspaceAsync(
-                new WorkspaceCleanupRequest(
-                    run.IssueIdentifier,
-                    workflowDefinition.Runtime.Workspace.Root,
-                    workflowDefinition.Runtime.Workspace.SharedClonePath,
-                    workflowDefinition.Runtime.Workspace.WorktreesRoot,
-                    workflowDefinition.Runtime.Hooks.BeforeRemove,
-                    workflowDefinition.Runtime.Hooks.TimeoutMs),
-                cancellationToken);
-
-            await UpdateWorkspaceCleanupRecordAsync(
-                new NormalizedIssue(
-                    run.IssueId,
-                    run.IssueIdentifier,
-                    run.IssueIdentifier,
-                    null,
-                    null,
-                    run.State,
-                    null,
-                    null,
-                    null,
-                    [],
-                    [],
-                    [],
-                    null,
-                    null),
-                RunStopReasons.Terminal,
-                cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Terminal cleanup failed for issue {IssueIdentifier}.", run.IssueIdentifier);
-        }
-    }
 }

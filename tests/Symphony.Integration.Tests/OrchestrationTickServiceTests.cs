@@ -17,7 +17,7 @@ using Symphony.Infrastructure.Workflows.Models;
 
 namespace Symphony.Integration.Tests;
 
-public sealed class OrchestrationTickServiceTests
+public sealed partial class OrchestrationTickServiceTests
 {
     [Fact]
     [Trait("Spec", "17.4")]
@@ -240,9 +240,14 @@ public sealed class OrchestrationTickServiceTests
             await using var scope = host.Services.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<SymphonyDbContext>();
             await db.Database.EnsureCreatedAsync();
-            db.Runs.Add(new RunEntity { Id = "run-1", IssueId = "issue-1", IssueIdentifier = "#1", State = "Open", Status = RunStatusNames.Running });
+            db.Runs.Add(new RunEntity { Id = "run-1", IssueId = "issue-1", IssueIdentifier = "#1", State = "Open", Status = RunStatusNames.Running, OwnerInstanceId = "instance-1" });
             db.RunAttempts.Add(new RunAttemptEntity { Id = "attempt-1", RunId = "run-1", IssueId = "issue-1", Status = RunStatusNames.Running });
             db.DispatchClaims.Add(new DispatchClaimEntity { IssueId = "issue-1", IssueIdentifier = "#1", ClaimedByInstanceId = "instance-1" });
+            db.InstanceLeases.Add(new InstanceLeaseEntity
+            {
+                LeaseName = WorkerLeaseNames.ForAttempt("run-1", "attempt-1"), OwnerInstanceId = "instance-1",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(15)
+            });
             await db.SaveChangesAsync();
             var coordinator = host.Services.GetRequiredService<IssueExecutionCoordinator>();
             var request = new IssueExecutionRequest("run-1", "attempt-1", "instance-1", null, BuildIssue("issue-1", "#1", "Open", null), workflow);
@@ -414,6 +419,7 @@ public sealed class OrchestrationTickServiceTests
     }
 
     [Fact]
+    [Trait("Spec", "17.4")]
     public async Task RunTickAsync_ShouldStopTerminalRunsAndCleanupWorkspace()
     {
         await using var harness = await TestHarness.CreateAsync(
@@ -429,11 +435,13 @@ public sealed class OrchestrationTickServiceTests
         await harness.Service.RunTickAsync(CancellationToken.None);
 
         Assert.Single(harness.WorkspaceManager.CleanupRequests);
-        Assert.Equal(RunStatusNames.CanceledByReconciliation, (await harness.DbContext.Runs.SingleAsync()).Status);
-        Assert.Equal(RunStatusNames.CanceledByReconciliation, (await harness.DbContext.DispatchClaims.SingleAsync()).Status);
+        Assert.Empty(await harness.DbContext.Runs.ToListAsync());
+        Assert.Empty(await harness.DbContext.RunAttempts.ToListAsync());
+        Assert.Empty(await harness.DbContext.DispatchClaims.ToListAsync());
     }
 
     [Fact]
+    [Trait("Spec", "17.4")]
     public async Task RunTickAsync_ShouldPersistTerminalStopBeforeCancelingLiveRun()
     {
         var coordinator = new FakeIssueExecutionCoordinator(
@@ -455,10 +463,14 @@ public sealed class OrchestrationTickServiceTests
         Assert.NotNull(coordinator.ObservedStopState);
         Assert.Equal(RunStopReasons.Terminal, coordinator.ObservedStopState.Value.RequestedStopReason);
         Assert.True(coordinator.ObservedStopState.Value.CleanupWorkspaceOnStop);
+        Assert.Single(await harness.DbContext.Runs.ToListAsync());
+        Assert.Single(await harness.DbContext.RunAttempts.ToListAsync());
+        Assert.Empty(harness.WorkspaceManager.CleanupRequests);
     }
 
     [Fact]
-    public async Task RunTickAsync_ShouldRefreshTrackedIssueCacheStateForClosedIssues()
+    [Trait("Spec", "17.4")]
+    public async Task RunTickAsync_ShouldForgetClosedIssuesAndStopPollingThem()
     {
         await using var harness = await TestHarness.CreateAsync(
             BuildWorkflowDefinition(maxConcurrentAgents: 1),
@@ -473,12 +485,16 @@ public sealed class OrchestrationTickServiceTests
 
         await harness.Service.RunTickAsync(CancellationToken.None);
 
-        var cachedIssue = await harness.DbContext.IssueCache.SingleAsync();
-        Assert.Equal("Closed", cachedIssue.State);
-        Assert.True(cachedIssue.CachedAtUtc > initialCachedAtUtc);
+        Assert.Empty(await harness.DbContext.IssueCache.ToListAsync());
+        var refreshCount = harness.Tracker.RefreshRequests.Count;
+        await harness.Service.RunTickAsync(CancellationToken.None);
+        Assert.Equal(refreshCount, harness.Tracker.RefreshRequests.Count);
+        Assert.False((await new RuntimeStateService(harness.DbContext, TimeProvider.System)
+            .GetIssueStateAsync("#1", CancellationToken.None)).Found);
     }
 
     [Fact]
+    [Trait("Spec", "17.4")]
     public async Task RunTickAsync_ShouldCleanupRetryWorkspaceWhenTrackedIssueBecomesClosed()
     {
         await using var harness = await TestHarness.CreateAsync(
@@ -497,9 +513,9 @@ public sealed class OrchestrationTickServiceTests
         var cleanupRequest = Assert.Single(harness.WorkspaceManager.CleanupRequests);
         Assert.Equal("#1", cleanupRequest.IssueIdentifier);
         Assert.Empty(await harness.DbContext.RetryQueue.ToListAsync());
-        Assert.Equal(RunStatusNames.CanceledByReconciliation, (await harness.DbContext.Runs.SingleAsync()).Status);
-        Assert.Equal(RunStatusNames.CanceledByReconciliation, (await harness.DbContext.DispatchClaims.SingleAsync()).Status);
-        Assert.NotNull((await harness.DbContext.WorkspaceRecords.SingleAsync()).LastCleanedAtUtc);
+        Assert.Empty(await harness.DbContext.Runs.ToListAsync());
+        Assert.Empty(await harness.DbContext.DispatchClaims.ToListAsync());
+        Assert.Empty(await harness.DbContext.WorkspaceRecords.ToListAsync());
     }
 
     [Fact]
@@ -938,13 +954,16 @@ public sealed class OrchestrationTickServiceTests
         IReadOnlyDictionary<string, string>? issueStatesById = null,
         bool matchesCandidateFilters = true,
         bool refreshFails = false,
-        Func<CancellationToken, Task>? beforeReturnCandidates = null) : IGitHubTrackerClient
+        Func<CancellationToken, Task>? beforeReturnCandidates = null,
+        IReadOnlyDictionary<string, string>? identifiersById = null) : IGitHubTrackerClient
     {
         private readonly Dictionary<string, string> statesById = issueStatesById is null
             ? new(StringComparer.OrdinalIgnoreCase)
             : new(issueStatesById, StringComparer.OrdinalIgnoreCase);
 
         public bool FetchCandidateIssuesCalled { get; private set; }
+        public List<IReadOnlyList<string>> RefreshRequests { get; } = [];
+        public void SetIssueState(string issueId, string state) => statesById[issueId] = state;
 
         public async Task<IReadOnlyList<NormalizedIssue>> FetchCandidateIssuesAsync(TrackerQuery query, CancellationToken cancellationToken = default)
         {
@@ -958,10 +977,11 @@ public sealed class OrchestrationTickServiceTests
         }
 
         public Task<IReadOnlyList<NormalizedIssue>> FetchIssuesByStatesAsync(TrackerQuery query, IReadOnlyList<string> states, CancellationToken cancellationToken = default)
-            => Task.FromResult<IReadOnlyList<NormalizedIssue>>([]);
+            => Task.FromResult<IReadOnlyList<NormalizedIssue>>(issues.Where(issue => states.Contains(issue.State)).ToList());
 
         public Task<IReadOnlyList<IssueStateSnapshot>> FetchIssueStatesByIdsAsync(TrackerQuery query, IReadOnlyList<string> issueIds, CancellationToken cancellationToken = default)
         {
+            RefreshRequests.Add(issueIds.ToList());
             if (refreshFails)
             {
                 throw new HttpRequestException("Transient tracker failure");
@@ -969,7 +989,8 @@ public sealed class OrchestrationTickServiceTests
 
             var snapshots = issueIds
                 .Where(id => statesById.ContainsKey(id))
-                .Select(id => new IssueStateSnapshot(id, statesById[id], matchesCandidateFilters))
+                .Select(id => new IssueStateSnapshot(id, statesById[id], matchesCandidateFilters,
+                    identifiersById?.GetValueOrDefault(id)))
                 .ToList();
             return Task.FromResult<IReadOnlyList<IssueStateSnapshot>>(snapshots);
         }
@@ -987,6 +1008,10 @@ public sealed class OrchestrationTickServiceTests
     private sealed class FakeWorkspaceManager : IWorkspaceManager
     {
         public List<WorkspaceCleanupRequest> CleanupRequests { get; } = [];
+        public Exception? CleanupException { get; set; }
+        public bool WorkspaceRemains { get; set; }
+        public bool WorkspaceAbsent { get; set; }
+        public Action? OnCleanup { get; set; }
 
         public Task<WorkspacePreparationResult> PrepareIssueWorkspaceAsync(WorkspacePreparationRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new WorkspacePreparationResult($"C:\\tmp\\{request.IssueIdentifier}", request.SuggestedBranchName ?? "branch", CreatedNow: true));
@@ -994,7 +1019,13 @@ public sealed class OrchestrationTickServiceTests
         public Task<WorkspaceCleanupResult> CleanupIssueWorkspaceAsync(WorkspaceCleanupRequest request, CancellationToken cancellationToken = default)
         {
             CleanupRequests.Add(request);
-            return Task.FromResult(new WorkspaceCleanupResult($"C:\\tmp\\{request.IssueIdentifier}", Existed: true, RemovedNow: true));
+            OnCleanup?.Invoke();
+            if (CleanupException is not null)
+            {
+                throw CleanupException;
+            }
+            return Task.FromResult(new WorkspaceCleanupResult($"C:\\tmp\\{request.IssueIdentifier}",
+                Existed: !WorkspaceAbsent, RemovedNow: !WorkspaceRemains && !WorkspaceAbsent));
         }
     }
 
@@ -1081,6 +1112,13 @@ public sealed class OrchestrationTickServiceTests
                 });
             }
 
+            var workerLeaseName = WorkerLeaseNames.ForAttempt(request.RunId, request.AttemptId);
+            var workerLease = await dbContext.InstanceLeases.SingleOrDefaultAsync(
+                row => row.LeaseName == workerLeaseName, cancellationToken);
+            if (workerLease is not null)
+            {
+                dbContext.InstanceLeases.Remove(workerLease);
+            }
             await dbContext.SaveChangesAsync(cancellationToken);
             return true;
         }
