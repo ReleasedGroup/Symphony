@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
+using System.Security.Cryptography;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Symphony.Core.Abstractions;
 using Symphony.Core.Models;
@@ -162,32 +164,6 @@ public sealed class GitWorktreeWorkspaceManager(
             return new WorkspaceCleanupResult(worktreePath, Existed: true, RemovedNow: false);
         }
 
-        if (!string.IsNullOrWhiteSpace(request.BeforeRemoveHook))
-        {
-            try
-            {
-                await workspaceHookRunner.RunHookAsync(
-                    new WorkspaceHookRequest(
-                        HookName: "before_remove",
-                        Script: request.BeforeRemoveHook,
-                        WorkspacePath: worktreePath,
-                        TimeoutMs: request.HookTimeoutMs,
-                        IssueIdentifier: request.IssueIdentifier),
-                    cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(
-                    ex,
-                    "before_remove hook failed for workspace {WorkspacePath}. Cleanup will continue.",
-                    worktreePath);
-            }
-        }
-
         var sharedCloneLock = GetSharedCloneLock(sharedClonePath);
         await sharedCloneLock.WaitAsync(cancellationToken);
         bool removedNow;
@@ -197,6 +173,36 @@ public sealed class GitWorktreeWorkspaceManager(
                 rootPath,
                 sharedClonePath,
                 cancellationToken);
+
+            if (!await VerifyRemovalOwnershipAsync(sharedClonePath, worktreePath, cancellationToken))
+            {
+                return new WorkspaceCleanupResult(worktreePath, Existed: true, RemovedNow: false);
+            }
+            if (!string.IsNullOrWhiteSpace(request.BeforeRemoveHook))
+            {
+                try
+                {
+                    await workspaceHookRunner.RunHookAsync(
+                        new WorkspaceHookRequest(
+                            HookName: "before_remove",
+                            Script: request.BeforeRemoveHook,
+                            WorkspacePath: worktreePath,
+                            TimeoutMs: request.HookTimeoutMs,
+                            IssueIdentifier: request.IssueIdentifier),
+                        cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(
+                        ex,
+                        "before_remove hook failed for workspace {WorkspacePath}. Cleanup will continue.",
+                        worktreePath);
+                }
+            }
 
             removedNow = await RemoveWorktreePathAsync(sharedClonePath, worktreePath, cancellationToken);
         }
@@ -353,34 +359,15 @@ public sealed class GitWorktreeWorkspaceManager(
         string worktreePath,
         CancellationToken cancellationToken)
     {
-        // Refuse linked descendants before invoking Git or recursive filesystem operations.
-        ValidateRemovalTree(worktreePath);
+        if (!await VerifyRemovalOwnershipAsync(sharedClonePath, worktreePath, cancellationToken)) return false;
         var marker = worktreePath + ".symphony-cleanup";
-        WorkspacePathSafety.EnsureNoReparsePoints(marker);
-        var gitFile = Path.Combine(worktreePath, ".git");
-        if (File.Exists(gitFile))
+        // Record contents, not just a path: a later retry must not erase new user work
+        // added after a partial deletion removed Git's own dirty-work protection.
+        if (File.Exists(Path.Combine(worktreePath, ".git")))
         {
-            var gitReference = (await File.ReadAllTextAsync(gitFile, cancellationToken)).Trim();
-            if (!gitReference.StartsWith("gitdir: ", StringComparison.Ordinal))
-                throw new InvalidOperationException("Workspace does not have a Git worktree reference.");
-            var gitPath = Path.GetFullPath(gitReference[8..], worktreePath);
-            WorkspacePathSafety.EnsurePathIsWithinRoot(Path.Combine(sharedClonePath, ".git", "worktrees"), gitPath);
-            var status = await RunGitAsync(worktreePath, ["status", "--porcelain", "--untracked-files=all"],
-                cancellationToken, throwOnNonZeroExitCode: false);
-            if (status.ExitCode != 0 || !string.IsNullOrWhiteSpace(status.Stdout))
-            {
-                logger.LogWarning("workspace_cleanup_preserved: uncommitted files or unreadable Git status at {WorkspacePath}.", worktreePath);
-                return false;
-            }
-            // Preserve proof of a verified clean worktree if a partial deletion removes .git.
-            await File.WriteAllTextAsync(marker, worktreePath, cancellationToken);
+            var manifest = new CleanupManifest(worktreePath, await ReadFileHashesAsync(worktreePath, cancellationToken));
+            await File.WriteAllTextAsync(marker, JsonSerializer.Serialize(manifest), cancellationToken);
         }
-        else if (!File.Exists(marker) || await File.ReadAllTextAsync(marker, cancellationToken) != worktreePath)
-        {
-            logger.LogWarning("workspace_cleanup_preserved: ownership unknown for {WorkspacePath}.", worktreePath);
-            return false;
-        }
-
         for (var attempt = 0; attempt < 4; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -397,6 +384,82 @@ public sealed class GitWorktreeWorkspaceManager(
             }
         }
         return false;
+    }
+
+    private async Task<bool> VerifyRemovalOwnershipAsync(string sharedClonePath, string worktreePath, CancellationToken cancellationToken)
+    {
+        // Refuse linked descendants before invoking Git or recursive filesystem operations.
+        ValidateRemovalTree(worktreePath);
+        var marker = worktreePath + ".symphony-cleanup";
+        WorkspacePathSafety.EnsureNoReparsePoints(marker);
+        var gitFile = Path.Combine(worktreePath, ".git");
+        if (File.Exists(gitFile))
+        {
+            var gitReference = (await File.ReadAllTextAsync(gitFile, cancellationToken)).Trim();
+            if (!gitReference.StartsWith("gitdir: ", StringComparison.Ordinal))
+                throw new InvalidOperationException("Workspace does not have a Git worktree reference.");
+            var gitPath = Path.GetFullPath(gitReference[8..], worktreePath);
+            WorkspacePathSafety.EnsurePathIsWithinRoot(Path.Combine(sharedClonePath, ".git", "worktrees"), gitPath);
+            var registeredGitFile = (await File.ReadAllTextAsync(Path.Combine(gitPath, "gitdir"), cancellationToken)).Trim();
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            if (!Path.GetFullPath(registeredGitFile, gitPath).Equals(gitFile, comparison))
+                throw new InvalidOperationException("Workspace reference belongs to a different registered worktree.");
+            var status = await RunGitAsync(worktreePath, ["status", "--porcelain", "--untracked-files=all"],
+                cancellationToken, throwOnNonZeroExitCode: false);
+            if (status.ExitCode != 0 || !string.IsNullOrWhiteSpace(status.Stdout))
+            {
+                logger.LogWarning("workspace_cleanup_preserved: uncommitted files or unreadable Git status at {WorkspacePath}.", worktreePath);
+                return false;
+            }
+
+        }
+        else
+        {
+            CleanupManifest? manifest = null;
+            if (File.Exists(marker))
+            {
+                try { manifest = JsonSerializer.Deserialize<CleanupManifest>(await File.ReadAllTextAsync(marker, cancellationToken)); }
+                catch (JsonException) { }
+            }
+            if (manifest?.WorkspacePath != worktreePath || manifest.Files is null)
+            {
+                logger.LogWarning("workspace_cleanup_preserved: ownership unknown for {WorkspacePath}.", worktreePath);
+                return false;
+            }
+            var remaining = await ReadFileHashesAsync(worktreePath, cancellationToken);
+            if (remaining.Any(file => !manifest.Files.TryGetValue(file.Key, out var hash) || hash != file.Value))
+            {
+                logger.LogWarning("workspace_cleanup_preserved: partial workspace contents changed at {WorkspacePath}.", worktreePath);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private sealed record CleanupManifest(string WorkspacePath, Dictionary<string, string> Files);
+
+    private static async Task<Dictionary<string, string>> ReadFileHashesAsync(string path, CancellationToken cancellationToken)
+    {
+        var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+        {
+            WorkspacePathSafety.EnsureNoReparsePoints(file);
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    await using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    hashes.Add(Path.GetRelativePath(path, file), Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken)));
+                    break;
+                }
+                catch (IOException) when (attempt < 3)
+                {
+                    await Task.Delay(200 * (1 << attempt), cancellationToken);
+                }
+            }
+        }
+        return hashes;
     }
 
     private async Task<bool> TryRemoveWorktreePathAsync(string sharedClonePath, string worktreePath, CancellationToken cancellationToken)

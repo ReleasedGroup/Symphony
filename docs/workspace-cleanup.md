@@ -36,7 +36,7 @@ and symbolic links/junctions in the path or removal tree are refused. A worktree
 reference the configured shared clone. Uncommitted tracked changes and non-ignored
 untracked files are preserved for manual recovery. Ignored build output remains
 disposable. A sibling `.symphony-cleanup` marker records a verified clean worktree
-before deletion, allowing later retries after `.git` is partially removed. Local
+before deletion, including file hashes. Later retries after `.git` is partially removed preserve any new or modified files rather than relying solely on the old path marker. Ownership and cleanliness are verified under the shared-clone lock before hooks, and again before removal; copied Git references must match the registration backpointer. Local
 branches are retained. Unknown or dirty directories need operator review; they are
 not forcibly erased. Workspace roots must remain writable only by trusted workers
 and administrators; path checks are not a sandbox against concurrent hostile edits.
