@@ -140,6 +140,16 @@ public sealed class ApiSmokeTests
                             State = "Open",
                             StartedAtUtc = DateTimeOffset.UtcNow
                         });
+                        // A running worker holds a lease even while dispatch is paused.
+                        // Without it, background recovery can turn this fixture into a retry.
+                        db.InstanceLeases.Add(new InstanceLeaseEntity
+                        {
+                            LeaseName = WorkerLeaseNames.ForAttempt("drain-test-run", "drain-test-attempt"),
+                            OwnerInstanceId = "drain-test-owner",
+                            AcquiredAtUtc = DateTimeOffset.UtcNow,
+                            UpdatedAtUtc = DateTimeOffset.UtcNow,
+                            ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+                        });
                         await db.SaveChangesAsync(cancellationToken);
                     }
 
@@ -157,6 +167,9 @@ public sealed class ApiSmokeTests
                         var db = scope.ServiceProvider.GetRequiredService<SymphonyDbContext>();
                         var run = await db.Runs.SingleAsync(item => item.Id == "drain-test-run", cancellationToken);
                         run.Status = RunStatusNames.Succeeded;
+                        db.InstanceLeases.Remove(await db.InstanceLeases.SingleAsync(
+                            lease => lease.LeaseName == WorkerLeaseNames.ForAttempt("drain-test-run", "drain-test-attempt"),
+                            cancellationToken));
                         await db.SaveChangesAsync(cancellationToken);
                     }
 
