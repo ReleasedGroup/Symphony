@@ -19,6 +19,41 @@ public sealed partial class OrchestrationTickServiceTests
 {
     [Fact]
     [Trait("Spec", "17.4")]
+    public async Task ReopenAfterCleanupReservation_ShouldPreserveWorkspace()
+    {
+        var tracker = new FakeTrackerClient([], new Dictionary<string, string> { ["issue-1"] = "Closed" });
+        tracker.BeforeStateRefresh = count => { if (count == 3) tracker.SetIssueState("issue-1", "Open"); };
+        await using var harness = await TestHarness.CreateAsync(BuildWorkflowDefinition(1), tracker,
+            new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning));
+        await harness.InsertIssueCacheAsync("issue-1", "#1", "Closed");
+        await harness.Service.RunTickAsync(CancellationToken.None);
+        Assert.Empty(harness.WorkspaceManager.CleanupRequests);
+        Assert.Empty(await harness.DbContext.DispatchClaims.ToListAsync());
+        Assert.Single(await harness.DbContext.IssueCache.ToListAsync());
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
+    public async Task FilterIneligibleWorkspace_ShouldRecoverFromFailedCleanupDuringStartup()
+    {
+        var tracker = new FakeTrackerClient([BuildIssue("issue-1", "#1", "Open", null)],
+            new Dictionary<string, string> { ["issue-1"] = "Open" }, matchesCandidateFilters: false);
+        await using var harness = await TestHarness.CreateAsync(BuildWorkflowDefinition(1), tracker,
+            new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning));
+        await harness.InsertRetryingRunAsync("issue-1", "#1", "Open", "instance-1");
+        harness.WorkspaceManager.WorkspaceRemains = true;
+        await harness.Service.RunStartupCleanupAsync(CancellationToken.None);
+        Assert.Single(await harness.DbContext.DispatchClaims.Where(claim => claim.Status == "cleanup").ToListAsync());
+        Assert.Empty(await harness.DbContext.RetryQueue.ToListAsync());
+        harness.DbContext.ChangeTracker.Clear();
+        harness.WorkspaceManager.WorkspaceRemains = false;
+        await harness.Service.RunStartupCleanupAsync(CancellationToken.None);
+        Assert.Empty(await harness.DbContext.WorkspaceRecords.ToListAsync());
+        Assert.Empty(await harness.DbContext.DispatchClaims.ToListAsync());
+    }
+
+    [Fact]
+    [Trait("Spec", "17.4")]
     public async Task CleanupReservation_ShouldBlockSameIssueDispatchWithoutBlockingUnrelatedWriters()
     {
         await using var harness = await TestHarness.CreateAsync(BuildWorkflowDefinition(1),
@@ -351,7 +386,14 @@ public sealed partial class OrchestrationTickServiceTests
     [InlineData(false)]
     public async Task FailedStartupCleanupOfUntrackedWorkspace_ShouldBeRetriedDuringPolling(bool throws)
     {
-        await using var harness = await TestHarness.CreateAsync(BuildWorkflowDefinition(1),
+        var root = Directory.CreateTempSubdirectory("symphony-discovery-").FullName;
+        Directory.CreateDirectory(Path.Combine(root, "1"));
+        var workflow = BuildWorkflowDefinition(1);
+        workflow = workflow with { Runtime = workflow.Runtime with
+        {
+            Workspace = workflow.Runtime.Workspace with { WorktreesRoot = root }
+        } };
+        await using var harness = await TestHarness.CreateAsync(workflow,
             new FakeTrackerClient([BuildIssue("issue-1", "#1", "Closed", null)],
                 new Dictionary<string, string> { ["issue-1"] = "Closed" }),
             new FakeIssueExecutionCoordinator(FakeDispatchOutcome.LeaveRunning));
@@ -361,10 +403,13 @@ public sealed partial class OrchestrationTickServiceTests
         Assert.Single(await harness.DbContext.IssueCache.ToListAsync());
         harness.WorkspaceManager.CleanupException = null;
         harness.WorkspaceManager.WorkspaceRemains = false;
+        // The fake successful removal represents the path disappearing too.
+        Directory.Delete(Path.Combine(root, "1"));
         await CreateManagedControl(harness.DbContext).SetPausedAsync(true, CancellationToken.None);
         await harness.Service.RunTickAsync(CancellationToken.None);
         Assert.Empty(await harness.DbContext.IssueCache.ToListAsync());
         Assert.Equal(2, harness.WorkspaceManager.CleanupRequests.Count);
+        Directory.Delete(root);
     }
 
     [Fact]

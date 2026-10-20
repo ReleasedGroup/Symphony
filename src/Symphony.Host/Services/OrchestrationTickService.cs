@@ -149,6 +149,13 @@ public sealed partial class OrchestrationTickService
             if (preflightError is null && !string.IsNullOrWhiteSpace(apiKey))
             {
                 await RefreshTrackedIssueCacheStatesAsync(workflowDefinition, apiKey, instanceId, cancellationToken);
+                // Discover worktrees whose preparation was interrupted before a record was saved.
+                // Unknown directories are not deleted: repository tracker identities remain authoritative.
+                if (Directory.Exists(workflowDefinition.Runtime.Workspace.WorktreesRoot) &&
+                    Directory.EnumerateDirectories(workflowDefinition.Runtime.Workspace.WorktreesRoot).Any())
+                {
+                    await RunStartupCleanupCoreAsync(workflowDefinition, apiKey, instanceId, cancellationToken, onlyExistingWorkspaces: true);
+                }
             }
 
             if (preflightError is not null || string.IsNullOrWhiteSpace(apiKey))

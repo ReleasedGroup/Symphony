@@ -79,7 +79,6 @@ public sealed class IssueExecutionCoordinator(
         RetryPlan? retryPlan = null;
         bool releaseClaim = false;
         var releaseStatus = RunStatusNames.Failed;
-        var cleanupWorkspace = false;
         WorkerLeaseHeartbeat? workerLeaseHeartbeat = null;
 
         try
@@ -249,14 +248,12 @@ public sealed class IssueExecutionCoordinator(
                     finalError = "terminal state reached";
                     releaseClaim = true;
                     releaseStatus = RunStatusNames.CanceledByReconciliation;
-                    cleanupWorkspace = stopState.CleanupWorkspaceOnStop;
                     break;
                 case RunStopReasons.Inactive:
                     finalStatus = RunStatusNames.CanceledByReconciliation;
                     finalError = "issue is no longer eligible for execution";
                     releaseClaim = true;
                     releaseStatus = RunStatusNames.CanceledByReconciliation;
-                    cleanupWorkspace = false;
                     break;
                 case RunStopReasons.Stalled:
                     finalStatus = RunStatusNames.Stalled;
@@ -285,7 +282,6 @@ public sealed class IssueExecutionCoordinator(
                     await using var scope = serviceScopeFactory.CreateAsyncScope();
                     var workspaceHookRunner = scope.ServiceProvider.GetRequiredService<IWorkspaceHookRunner>();
                     var dbContext = scope.ServiceProvider.GetRequiredService<SymphonyDbContext>();
-                    var workspaceManager = scope.ServiceProvider.GetRequiredService<IWorkspaceManager>();
 
                     await RunBestEffortHookAsync(
                         workspaceHookRunner,
@@ -296,38 +292,8 @@ public sealed class IssueExecutionCoordinator(
                         request.WorkflowDefinition.Runtime.Hooks.TimeoutMs,
                         CancellationToken.None);
 
-                    if (cleanupWorkspace)
-                    {
-                        try
-                        {
-                            var cleanupResult = await workspaceManager.CleanupIssueWorkspaceAsync(
-                                new WorkspaceCleanupRequest(
-                                    request.Issue.Identifier,
-                                    request.WorkflowDefinition.Runtime.Workspace.Root,
-                                    request.WorkflowDefinition.Runtime.Workspace.SharedClonePath,
-                                    request.WorkflowDefinition.Runtime.Workspace.WorktreesRoot,
-                                    request.WorkflowDefinition.Runtime.Hooks.BeforeRemove,
-                                    request.WorkflowDefinition.Runtime.Hooks.TimeoutMs),
-                                CancellationToken.None);
-
-                            if (!cleanupResult.Existed || cleanupResult.RemovedNow)
-                            {
-                                await UpdateWorkspaceCleanupAsync(
-                                    dbContext,
-                                    request.Issue,
-                                    RunStopReasons.Terminal,
-                                    timeProvider.GetUtcNow(),
-                                    CancellationToken.None);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            // Finalize and release the run even when removal fails. The
-                            // terminal sweep retains its records and retries next tick.
-                            logger.LogWarning(ex, "terminal_issue_cleanup_failed for {IssueId} {IssueIdentifier}; cleanup will retry.",
-                                request.Issue.Id, request.Issue.Identifier);
-                        }
-                    }
+                    // Cleanup is reconciled after finalization and worker lease release,
+                    // using fresh tracker eligibility rather than this run's old snapshot.
 
                     if (finalStatus is not null)
                     {
@@ -652,27 +618,6 @@ public sealed class IssueExecutionCoordinator(
         var attempt = await dbContext.RunAttempts.SingleAsync(attemptEntity => attemptEntity.Id == request.AttemptId, cancellationToken);
         attempt.WorkspacePath = workspace.WorkspacePath;
 
-        await dbContext.SaveChangesAsync(cancellationToken);
-    }
-
-    private static async Task UpdateWorkspaceCleanupAsync(
-        SymphonyDbContext dbContext,
-        NormalizedIssue issue,
-        string reason,
-        DateTimeOffset cleanedAtUtc,
-        CancellationToken cancellationToken)
-    {
-        var workspaceRecord = await dbContext.WorkspaceRecords.SingleOrDefaultAsync(
-            record => record.IssueId == issue.Id,
-            cancellationToken);
-
-        if (workspaceRecord is null)
-        {
-            return;
-        }
-
-        workspaceRecord.LastCleanedAtUtc = cleanedAtUtc;
-        workspaceRecord.LastCleanupReason = reason;
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 

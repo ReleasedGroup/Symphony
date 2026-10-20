@@ -15,4 +15,5 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup><Compile Include="..\Shared\OwnedProcessLifetime.cs" Link="OwnedProcessLifetime.cs" /></ItemGroup>
 </Project>

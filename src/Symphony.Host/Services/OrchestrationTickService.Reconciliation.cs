@@ -169,7 +169,7 @@ public sealed partial class OrchestrationTickService
                 await RequestRunStopAsync(
                     run,
                     RunStopReasons.Inactive,
-                    cleanupWorkspace: false,
+                    cleanupWorkspace: true,
                     workflowDefinition.Runtime.Agent.MaxRetryBackoffMs,
                     instanceId,
                     cancellationToken);

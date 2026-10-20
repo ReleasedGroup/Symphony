@@ -14,9 +14,11 @@ public sealed partial class OrchestrationTickService
         WorkflowDefinition workflowDefinition,
         string apiKey,
         string instanceId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool onlyExistingWorkspaces = false)
     {
-        var terminalStates = workflowDefinition.Runtime.Tracker.TerminalStates;
+        var terminalStates = workflowDefinition.Runtime.Tracker.TerminalStates
+            .Concat(workflowDefinition.Runtime.Tracker.ActiveStates).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (terminalStates.Count == 0)
         {
             logger.LogDebug("Skipping startup terminal cleanup because tracker.terminal_states is empty.");
@@ -52,47 +54,28 @@ public sealed partial class OrchestrationTickService
             .Union(dbContext.RetryQueue.Select(retry => retry.IssueId))
             .Union(dbContext.EventLog.Where(entry => entry.IssueId != null).Select(entry => entry.IssueId!))
             .ToListAsync(cancellationToken)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var legacyEventIdentifiers = (await dbContext.EventLog
-            .Where(entry => entry.IssueId == null && entry.IssueIdentifier != null)
-            .Select(entry => entry.IssueIdentifier!).Distinct().ToListAsync(cancellationToken))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var retainedIdentifiers = (await dbContext.EventLog.Where(entry => entry.IssueIdentifier != null)
+            .Select(entry => entry.IssueIdentifier!).Distinct().ToListAsync(cancellationToken)).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         foreach (var issue in terminalIssues)
         {
+            var exists = Directory.Exists(Path.Combine(workflowDefinition.Runtime.Workspace.WorktreesRoot,
+                WorkspacePathSafety.SanitizeIssueIdentifier(issue.Identifier)));
+            if (!exists && (onlyExistingWorkspaces || (!retainedIds.Contains(issue.Id) && !retainedIdentifiers.Contains(issue.Identifier))))
+            {
+                continue;
+            }
+            // Persist discovery before removal, including worktrees left by a preparation crash.
+            // All removals use the same reservation, liveness checks and fresh eligibility check.
             try
             {
-                if (retainedIds.Contains(issue.Id) || legacyEventIdentifiers.Contains(issue.Identifier))
-                {
-                    await CleanupTerminalIssueAsync(issue.Id, issue.Identifier, workflowDefinition, instanceId, cancellationToken);
-                }
-                else
-                {
-                    // Most terminal GitHub issues have already been forgotten locally.
-                    // Sweep any leftover directory without opening a deletion transaction
-                    // or rewriting lifetime accounting for every historical issue.
-                    var result = await workspaceManager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest(
-                        issue.Identifier, workflowDefinition.Runtime.Workspace.Root,
-                        workflowDefinition.Runtime.Workspace.SharedClonePath, workflowDefinition.Runtime.Workspace.WorktreesRoot,
-                        workflowDefinition.Runtime.Hooks.BeforeRemove, workflowDefinition.Runtime.Hooks.TimeoutMs), cancellationToken);
-                    if (result.Existed && !result.RemovedNow)
-                    {
-                        await UpsertIssueCacheAsync([issue], cancellationToken);
-                    }
-                }
+                await UpsertIssueCacheAsync([issue], cancellationToken);
+                await CleanupTerminalIssueAsync(issue.Id, issue.Identifier, workflowDefinition, instanceId, cancellationToken);
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Startup terminal cleanup failed for issue {IssueIdentifier}.", issue.Identifier);
-                if (!retainedIds.Contains(issue.Id) && !legacyEventIdentifiers.Contains(issue.Identifier))
-                {
-                    // A worktree can outlive its state after a crash during preparation.
-                    // Remember failed startup removal so normal ticks retry it too.
-                    await UpsertIssueCacheAsync([issue], cancellationToken);
-                }
+                logger.LogWarning(ex, "workspace_cleanup_failed for {IssueId} {IssueIdentifier}; continuing reconciliation.", issue.Id, issue.Identifier);
             }
         }
     }
@@ -219,7 +202,7 @@ public sealed partial class OrchestrationTickService
                 hasChanges = true;
             }
 
-            if (isTerminal)
+            if (isTerminal || !refreshedState.IsExecutionEligible(workflowDefinition.Runtime.Tracker.ActiveStates))
             {
                 var identifier = refreshedState.Identifier ?? trackedGroup
                     .Select(issue => issue.Identifier).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));

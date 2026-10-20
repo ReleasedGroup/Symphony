@@ -58,6 +58,7 @@ public sealed class WorkspaceHookRunner(ILogger<WorkspaceHookRunner> logger) : I
                         $"Failed to start hook '{request.HookName}'.");
                 }
 
+                await using var ownedProcess = new Symphony.Infrastructure.Processes.OwnedProcessLifetime(process);
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
 
@@ -130,6 +131,7 @@ public sealed class WorkspaceHookRunner(ILogger<WorkspaceHookRunner> logger) : I
         CancellationToken cancellationToken)
     {
         var hookDirectory = Path.Combine(request.WorkspacePath, TempHookDirectoryName);
+        WorkspacePathSafety.EnsurePathIsWithinRoot(request.WorkspacePath, hookDirectory);
         Directory.CreateDirectory(hookDirectory);
 
         var extension = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".cmd" : ".sh";
