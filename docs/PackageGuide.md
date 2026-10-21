@@ -17,6 +17,8 @@ The release workflow expects tags in one of these forms:
 
 ## First-Run Setup
 
+If your workflow hooks, Git credential helper, or agent commands use GitHub CLI (`gh`), install it and run `gh auth status` under the account and environment that will execute them. If an environment token is invalid, replace it through the existing secret configuration: for GitHub.com, `GH_TOKEN` takes precedence over `GITHUB_TOKEN`, and both override stored credentials. Use `gh auth login` locally for missing or invalid authentication only when no environment token overrides stored credentials. Run `gh auth status` again before starting unattended work. Do not blindly unset `GITHUB_TOKEN`, because Symphony's tracker may depend on it. For WSL, do this inside the same distribution and Linux account as Symphony. See the [GitHub CLI authentication prerequisite](UserGuide.md#github-cli-authentication-prerequisite) for environment-based authentication and the distinction from Symphony's configured GitHub token. The installer checks listed below cover Codex readiness, not `gh` authentication.
+
 After extracting a bundle, start the interactive installer:
 
 - Windows: `.\setup-symphony.cmd`
@@ -85,3 +87,5 @@ Remove `--preflight-only` to install. The command returns one JSON object on std
 Set the named token environment variable for the account that runs Symphony. That account needs read/write access to the instance directory, its SQLite database and workspaces, and access to git, the repository, and the Codex CLI. Install a supported Codex CLI version and complete `codex login` for that same account; the agent checks both CLI version and authentication before launch. Provision the environment variable through the operating system or service manager. The managed installer does not write a `.env` file or print the token value. On Windows, configure a service identity with access to these resources; on macOS and Linux, use an equivalent dedicated service account and service manager. Use the generated `run-symphony.cmd` or `run-symphony.sh` for subsequent starts.
 
 The managed install tests run on Windows, macOS, and Linux runners, and CI publishes each of the six release RIDs: `win-x64`, `win-arm64`, `osx-x64`, `osx-arm64`, `linux-x64`, and `linux-arm64`.
+
+For workflows that use `gh`, verify its authentication under that service account as described in [First-Run Setup](#first-run-setup). If a dispatched job remains at **Session not started** with zero turns/tokens, follow the [startup troubleshooting steps](UserGuide.md#dispatched-job-shows-session-not-started-and-zero-turnstokens).
