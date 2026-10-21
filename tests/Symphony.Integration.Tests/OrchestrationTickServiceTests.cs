@@ -258,6 +258,7 @@ public sealed partial class OrchestrationTickServiceTests
             db.ChangeTracker.Clear();
 
             Assert.Equal(expectRetry ? 1 : 0, await db.RetryQueue.CountAsync());
+            Assert.Null((await db.RunAttempts.SingleAsync()).Error);
             if (expectRetry)
             {
                 Assert.Equal(RetryDelayTypes.Continuation, (await db.RetryQueue.SingleAsync()).DelayType);
@@ -299,7 +300,7 @@ public sealed partial class OrchestrationTickServiceTests
 
     [Fact]
     [Trait("Spec", "17.4")]
-    public async Task RunTickAsync_ShouldStopOpenRunOutsideExecutionFiltersWithoutCleanup()
+    public async Task RunTickAsync_ShouldCleanupOpenRunOutsideExecutionFilters()
     {
         await using var harness = await TestHarness.CreateAsync(
             BuildWorkflowDefinition(maxConcurrentAgents: 1),
@@ -309,13 +310,11 @@ public sealed partial class OrchestrationTickServiceTests
 
         await harness.Service.RunTickAsync(CancellationToken.None);
 
-        var run = await harness.DbContext.Runs.SingleAsync();
-        Assert.Equal("Open", run.State);
-        Assert.Equal(RunStatusNames.CanceledByReconciliation, run.Status);
-        Assert.Empty(harness.WorkspaceManager.CleanupRequests);
+        Assert.Empty(await harness.DbContext.Runs.ToListAsync());
+        Assert.Single(harness.WorkspaceManager.CleanupRequests);
         Assert.Empty(await harness.DbContext.RetryQueue.ToListAsync());
         Assert.Empty(harness.Coordinator.StartRequests);
-        Assert.Equal(RunStatusNames.CanceledByReconciliation, (await harness.DbContext.DispatchClaims.SingleAsync()).Status);
+        Assert.Empty(await harness.DbContext.DispatchClaims.ToListAsync());
     }
 
     [Fact]
@@ -336,8 +335,8 @@ public sealed partial class OrchestrationTickServiceTests
 
         Assert.Empty(await harness.DbContext.RetryQueue.ToListAsync());
         Assert.Empty(harness.Coordinator.StartRequests);
-        Assert.Empty(harness.WorkspaceManager.CleanupRequests);
-        Assert.Equal("Open", (await harness.DbContext.Runs.SingleAsync()).State);
+        Assert.Single(harness.WorkspaceManager.CleanupRequests);
+        Assert.Empty(await harness.DbContext.Runs.ToListAsync());
     }
 
     [Fact]
@@ -551,7 +550,7 @@ public sealed partial class OrchestrationTickServiceTests
     }
 
     [Fact]
-    public async Task RunTickAsync_ShouldStopNonActiveRunsWithoutCleanup()
+    public async Task RunTickAsync_ShouldCleanupNonActiveRuns()
     {
         await using var harness = await TestHarness.CreateAsync(
             BuildWorkflowDefinition(maxConcurrentAgents: 1),
@@ -565,8 +564,8 @@ public sealed partial class OrchestrationTickServiceTests
 
         await harness.Service.RunTickAsync(CancellationToken.None);
 
-        Assert.Empty(harness.WorkspaceManager.CleanupRequests);
-        Assert.Equal(RunStatusNames.CanceledByReconciliation, (await harness.DbContext.Runs.SingleAsync()).Status);
+        Assert.Single(harness.WorkspaceManager.CleanupRequests);
+        Assert.Empty(await harness.DbContext.Runs.ToListAsync());
     }
 
     [Fact]
@@ -963,6 +962,7 @@ public sealed partial class OrchestrationTickServiceTests
 
         public bool FetchCandidateIssuesCalled { get; private set; }
         public List<IReadOnlyList<string>> RefreshRequests { get; } = [];
+        public Action<int>? BeforeStateRefresh { get; set; }
         public void SetIssueState(string issueId, string state) => statesById[issueId] = state;
 
         public async Task<IReadOnlyList<NormalizedIssue>> FetchCandidateIssuesAsync(TrackerQuery query, CancellationToken cancellationToken = default)
@@ -982,14 +982,15 @@ public sealed partial class OrchestrationTickServiceTests
         public Task<IReadOnlyList<IssueStateSnapshot>> FetchIssueStatesByIdsAsync(TrackerQuery query, IReadOnlyList<string> issueIds, CancellationToken cancellationToken = default)
         {
             RefreshRequests.Add(issueIds.ToList());
+            BeforeStateRefresh?.Invoke(RefreshRequests.Count);
             if (refreshFails)
             {
                 throw new HttpRequestException("Transient tracker failure");
             }
 
             var snapshots = issueIds
-                .Where(id => statesById.ContainsKey(id))
-                .Select(id => new IssueStateSnapshot(id, statesById[id], matchesCandidateFilters,
+                .Where(id => statesById.ContainsKey(id) || issues.Any(issue => issue.Id == id))
+                .Select(id => new IssueStateSnapshot(id, statesById.GetValueOrDefault(id) ?? issues.Single(issue => issue.Id == id).State, matchesCandidateFilters,
                     identifiersById?.GetValueOrDefault(id)))
                 .ToList();
             return Task.FromResult<IReadOnlyList<IssueStateSnapshot>>(snapshots);

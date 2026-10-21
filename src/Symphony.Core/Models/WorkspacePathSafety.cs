@@ -15,10 +15,23 @@ public static partial class WorkspacePathSafety
         var candidate = GetAbsolutePath(candidatePath);
         var rootWithSeparator = root + Path.DirectorySeparatorChar;
 
-        if (!candidate.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase) &&
-            !candidate.Equals(root, StringComparison.OrdinalIgnoreCase))
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (!candidate.StartsWith(rootWithSeparator, comparison) &&
+            !candidate.Equals(root, comparison))
         {
             throw new InvalidOperationException($"Path '{candidatePath}' must be within root '{rootPath}'.");
+        }
+        EnsureNoReparsePoints(candidate);
+    }
+
+    public static void EnsureNoReparsePoints(string path)
+    {
+        for (var current = new DirectoryInfo(GetAbsolutePath(path)); current is not null; current = current.Parent)
+        {
+            if ((current.Attributes & FileAttributes.ReparsePoint) != 0 && current.Attributes != (FileAttributes)(-1))
+            {
+                throw new InvalidOperationException($"Workspace path must not traverse a symbolic link or junction: '{current.FullName}'.");
+            }
         }
     }
 
@@ -26,6 +39,10 @@ public static partial class WorkspacePathSafety
     {
         var input = string.IsNullOrWhiteSpace(issueIdentifier) ? "issue" : issueIdentifier.Trim();
         var sanitized = UnsafeWorkspaceNameCharactersRegex().Replace(input, "_").Trim('_');
+        if (sanitized is "." or "..")
+        {
+            throw new InvalidOperationException("Issue identifier must name a workspace, not its parent.");
+        }
         return string.IsNullOrWhiteSpace(sanitized) ? "issue" : sanitized.ToLowerInvariant();
     }
 

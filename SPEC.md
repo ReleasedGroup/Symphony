@@ -804,8 +804,8 @@ Part B: Tracker state refresh
 - For each running issue:
   - If tracker state is terminal: terminate worker and clean workspace.
   - If tracker state is still active and candidate label/milestone filters match: update the in-memory issue snapshot.
-  - If candidate label/milestone filters no longer match: terminate worker without workspace cleanup or retry; release the claim. The issue may remain open for PR review.
-  - If tracker state is neither active nor terminal: terminate worker without workspace cleanup.
+  - If candidate label/milestone filters no longer match: terminate worker without retry; reconcile workspace cleanup after finalization and fresh eligibility verification. Preserve uncommitted work.
+  - If tracker state is neither active nor terminal: terminate worker and reconcile workspace cleanup after finalization.
 - If state refresh fails, keep workers running and try again on the next tick.
 
 The same candidate label/milestone filter check applies between live continuation turns and before
@@ -828,6 +828,11 @@ When the service starts:
 This prevents stale terminal workspaces from accumulating after restarts.
 
 ### 8.7 Terminal Issue State Retention
+
+The same deferred cleanup lifecycle applies to retained issues that no longer match
+current active states, labels or milestone specifications. Recheck current eligibility
+before removal and preserve unknown, linked or dirty workspaces. See
+`docs/workspace-cleanup.md` for bounded Windows retries and process ownership rules.
 
 Once the tracker confirms a configured terminal state (`Closed` by default), cleanup must remove
 the issue's local operational state as well as its workspace. Startup cleanup and polling must
@@ -1729,7 +1734,7 @@ Operators can control behavior by:
 - `WORKFLOW.md` changes should be detected and re-applied automatically without restart.
 - Changing issue states in the tracker:
   - terminal state -> running session is stopped and workspace cleaned when reconciled
-  - non-active state -> running session is stopped without cleanup
+  - non-active state -> running session is stopped; cleanup follows finalization and eligibility verification
 - Restarting the service for process recovery or deployment (not as the normal path for applying
   workflow config changes).
 
@@ -1892,7 +1897,7 @@ function reconcile_running_issues(state):
     else if issue.state in active_states:
       state.running[issue.id].issue = issue
     else:
-      state = terminate_running_issue(state, issue.id, cleanup_workspace=false)
+      state = terminate_running_issue(state, issue.id, cleanup_workspace=true)
 
   return state
 ```
@@ -2133,7 +2138,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `Todo` issue with non-terminal blockers is not eligible
 - `Todo` issue with terminal blockers is eligible
 - Active-state issue refresh updates running entry state
-- Non-active state stops running agent without workspace cleanup
+- Non-active state stops running agent and schedules safe workspace cleanup
 - Terminal state stops running agent and cleans workspace
 - Terminal cleanup prunes all issue-correlated operational state only after worker finalization and successful/absent workspace removal; unrelated open issues and live foreign owners are preserved
 - Failed/incomplete cleanup and cancellation retain recovery records; failed/missing tracker refreshes do not prune
@@ -2143,7 +2148,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Closed issues leave the polling set, dashboard activity, and per-issue status; reopened eligible issues can dispatch afresh
 - Reconciliation with no running issues is a no-op
 - Normal worker exit schedules a short continuation retry (attempt 1)
-- Loss of a configured execution label or milestone stops live continuation and running-issue reconciliation without workspace cleanup; successful filter-ineligible runs schedule no retry, and persisted retries cannot redispatch absent candidates
+- Loss of a configured execution label or milestone stops live continuation and running-issue reconciliation with cleanup after finalization; successful filter-ineligible runs schedule no retry, and persisted retries cannot redispatch absent candidates
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error

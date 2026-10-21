@@ -8,6 +8,163 @@ namespace Symphony.Integration.Tests;
 
 public sealed class WorkspaceManagerTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    [Trait("Spec", "17.3")]
+    public async Task Cleanup_ShouldPreserveNewOrModifiedWorkAfterPartialRemoval(bool addedFile)
+    {
+        var root = Directory.CreateTempSubdirectory("symphony-changed-remnant-").FullName;
+        var tree = Directory.CreateDirectory(Path.Combine(root, "trees", "1")).FullName;
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(tree, "old.txt"), "original");
+            await WriteCleanupManifestAsync(tree);
+            var changed = Path.Combine(tree, addedFile ? "new.txt" : "old.txt");
+            await File.WriteAllTextAsync(changed, "user work");
+            var hooks = new RecordingWorkspaceHookRunner();
+            var manager = new GitWorktreeWorkspaceManager(hooks, NullLogger<GitWorktreeWorkspaceManager>.Instance);
+            var result = await manager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest("#1", root,
+                Path.Combine(root, "repo"), Path.Combine(root, "trees"), "echo cleanup", 1000));
+            Assert.False(result.RemovedNow);
+            Assert.Empty(hooks.Requests);
+            Assert.Equal("user work", await File.ReadAllTextAsync(changed));
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
+    [Trait("Spec", "17.3")]
+    public async Task Cleanup_ShouldNotRunHookForInvalidOwnershipMarker()
+    {
+        var root = Directory.CreateTempSubdirectory("symphony-marker-").FullName;
+        var tree = Directory.CreateDirectory(Path.Combine(root, "trees", "1")).FullName;
+        try
+        {
+            await File.WriteAllTextAsync(tree + ".symphony-cleanup", "different workspace");
+            await File.WriteAllTextAsync(Path.Combine(tree, "keep.txt"), "keep");
+            var hooks = new RecordingWorkspaceHookRunner();
+            var manager = new GitWorktreeWorkspaceManager(hooks, NullLogger<GitWorktreeWorkspaceManager>.Instance);
+            var result = await manager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest("#1", root,
+                Path.Combine(root, "repo"), Path.Combine(root, "trees"), "echo cleanup", 1000));
+            Assert.False(result.RemovedNow);
+            Assert.Empty(hooks.Requests);
+            Assert.Equal("keep", await File.ReadAllTextAsync(Path.Combine(tree, "keep.txt")));
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
+    [Trait("Spec", "17.3")]
+    public async Task Cleanup_ShouldPreserveUnknownDirectory()
+    {
+        var root = Directory.CreateTempSubdirectory("symphony-unknown-").FullName;
+        var tree = Directory.CreateDirectory(Path.Combine(root, "trees", "1")).FullName;
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(tree, "user.txt"), "keep");
+            var manager = new GitWorktreeWorkspaceManager(new NoOpWorkspaceHookRunner(), NullLogger<GitWorktreeWorkspaceManager>.Instance);
+            var result = await manager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest("#1", root,
+                Path.Combine(root, "repo"), Path.Combine(root, "trees"), null, 1000));
+            Assert.False(result.RemovedNow);
+            Assert.Equal("keep", await File.ReadAllTextAsync(Path.Combine(tree, "user.txt")));
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
+    [Trait("Spec", "17.3")]
+    public async Task Cleanup_ShouldRejectJunctionWithoutTouchingTarget()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = Directory.CreateTempSubdirectory("symphony-junction-").FullName;
+        var outside = Directory.CreateTempSubdirectory("symphony-outside-").FullName;
+        var trees = Directory.CreateDirectory(Path.Combine(root, "trees")).FullName;
+        var link = Path.Combine(trees, "1");
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(outside, "keep.txt"), "keep");
+            using var process = Process.Start(new ProcessStartInfo("cmd.exe", $"/d /c mklink /J \"{link}\" \"{outside}\"")
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true })!;
+            await process.WaitForExitAsync();
+            Assert.Equal(0, process.ExitCode);
+            var manager = new GitWorktreeWorkspaceManager(new NoOpWorkspaceHookRunner(), NullLogger<GitWorktreeWorkspaceManager>.Instance);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => manager.CleanupIssueWorkspaceAsync(
+                new WorkspaceCleanupRequest("#1", root, Path.Combine(root, "repo"), trees, null, 1000)));
+            Assert.Equal("keep", await File.ReadAllTextAsync(Path.Combine(outside, "keep.txt")));
+        }
+        finally
+        {
+            // Remove only the fixture junction itself, never recursively follow it.
+            if (Directory.Exists(link)) Directory.Delete(link);
+            TryDeleteDirectory(root);
+            TryDeleteDirectory(outside);
+        }
+    }
+
+    [Theory]
+    [InlineData(".")]
+    [InlineData("..")]
+    [Trait("Spec", "17.3")]
+    public async Task Cleanup_ShouldRejectParentIdentifiers(string identifier)
+    {
+        var root = Directory.CreateTempSubdirectory("symphony-safety-").FullName;
+        try
+        {
+            var manager = new GitWorktreeWorkspaceManager(new NoOpWorkspaceHookRunner(), NullLogger<GitWorktreeWorkspaceManager>.Instance);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => manager.CleanupIssueWorkspaceAsync(
+                new WorkspaceCleanupRequest(identifier, root, Path.Combine(root, "repo"), Path.Combine(root, "trees"), null, 1000)));
+            Assert.True(Directory.Exists(root));
+        }
+        finally { Directory.Delete(root); }
+    }
+
+    [Fact]
+    [Trait("Spec", "17.3")]
+    public async Task Cleanup_ShouldRetryWindowsLockAndRecoverAfterRelease()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = Directory.CreateTempSubdirectory("symphony-lock-").FullName;
+        var tree = Directory.CreateDirectory(Path.Combine(root, "trees", "1")).FullName;
+        try
+        {
+            // Model a verified worktree partially removed by a previous cleanup attempt.
+            var file = Path.Combine(tree, "locked.txt");
+            await File.WriteAllTextAsync(file, "fixture");
+            await WriteCleanupManifestAsync(tree);
+            using var held = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var manager = new GitWorktreeWorkspaceManager(new NoOpWorkspaceHookRunner(), NullLogger<GitWorktreeWorkspaceManager>.Instance);
+            var cleanup = manager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest("#1", root,
+                Path.Combine(root, "repo"), Path.Combine(root, "trees"), null, 1000));
+            await Task.Delay(350);
+            held.Dispose();
+            Assert.True((await cleanup).RemovedNow);
+            Assert.False(Directory.Exists(tree));
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
+    [Trait("Spec", "17.3")]
+    public async Task Cleanup_ShouldRemainQueuedWhenWindowsLockPersists()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = Directory.CreateTempSubdirectory("symphony-lock-").FullName;
+        var tree = Directory.CreateDirectory(Path.Combine(root, "trees", "1")).FullName;
+        try
+        {
+            var file = Path.Combine(tree, "locked.txt");
+            await File.WriteAllTextAsync(file, "fixture");
+            await WriteCleanupManifestAsync(tree);
+            var manager = new GitWorktreeWorkspaceManager(new NoOpWorkspaceHookRunner(), NullLogger<GitWorktreeWorkspaceManager>.Instance);
+            var request = new WorkspaceCleanupRequest("#1", root, Path.Combine(root, "repo"), Path.Combine(root, "trees"), null, 1000);
+            using (var held = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+                Assert.False((await manager.CleanupIssueWorkspaceAsync(request)).RemovedNow);
+            Assert.True((await manager.CleanupIssueWorkspaceAsync(request)).RemovedNow);
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
     [Fact]
     public async Task PrepareIssueWorkspaceAsync_ShouldCreateSharedCloneAndWorktree()
     {
@@ -173,6 +330,21 @@ public sealed class WorkspaceManagerTests
                 BaseBranch: "main",
                 RemoteRepositoryUrl: remoteBare));
 
+            var uncommittedFile = Path.Combine(prepare.WorkspacePath, "keep.txt");
+            await File.WriteAllTextAsync(uncommittedFile, "user work");
+            var preserved = await manager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest(
+                "#101", workspaceRoot, sharedClonePath, worktreesRoot, "echo cleanup", 1000));
+            Assert.False(preserved.RemovedNow);
+            Assert.Empty(hookRunner.Requests);
+            Assert.Equal("user work", await File.ReadAllTextAsync(uncommittedFile));
+            File.Delete(uncommittedFile);
+
+            var copied = Directory.CreateDirectory(Path.Combine(worktreesRoot, "102")).FullName;
+            File.Copy(Path.Combine(prepare.WorkspacePath, ".git"), Path.Combine(copied, ".git"));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => manager.CleanupIssueWorkspaceAsync(
+                new WorkspaceCleanupRequest("#102", workspaceRoot, sharedClonePath, worktreesRoot, "echo cleanup", 1000)));
+            Assert.Empty(hookRunner.Requests);
+            Assert.True(Directory.Exists(prepare.WorkspacePath));
             var cleanup = await manager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest(
                 IssueIdentifier: "#101",
                 WorkspaceRoot: workspaceRoot,
@@ -241,6 +413,14 @@ public sealed class WorkspaceManagerTests
         {
             TryDeleteDirectory(tempRoot);
         }
+    }
+
+    private static async Task WriteCleanupManifestAsync(string tree)
+    {
+        var files = new Dictionary<string, string>();
+        foreach (var file in Directory.EnumerateFiles(tree, "*", SearchOption.AllDirectories))
+            files.Add(Path.GetRelativePath(tree, file), Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(file))));
+        await File.WriteAllTextAsync(tree + ".symphony-cleanup", System.Text.Json.JsonSerializer.Serialize(new { WorkspacePath = tree, Files = files }));
     }
 
     private static async Task<GitCommandResult> RunGitAsync(

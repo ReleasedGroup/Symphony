@@ -15,6 +15,16 @@ public sealed partial class OrchestrationTickService
         string instanceId,
         CancellationToken cancellationToken)
     {
+        var preflightKey = Symphony.Infrastructure.Workflows.WorkflowDispatchPreflightValidator.ValidateAndResolveApiKey(workflow);
+        var refreshed = await TryFetchIssueStatesByIdsAsync(workflow, preflightKey, [issueId],
+            "workspace_cleanup_refresh_failed; retaining workspace.", cancellationToken);
+        var observed = refreshed?.SingleOrDefault(item => item.Id == issueId);
+        if (observed is null || (!MatchesTerminalState(observed.State, workflow.Runtime.Tracker.TerminalStates) &&
+            observed.IsExecutionEligible(workflow.Runtime.Tracker.ActiveStates)))
+        {
+            return;
+        }
+
         // Flush reconciliation changes before bulk deletion; do not let tracked rows
         // reappear on a later SaveChanges. Reserve this issue in a short transaction
         // so hooks and filesystem operations cannot block unrelated database writers.
@@ -67,6 +77,35 @@ public sealed partial class OrchestrationTickService
 
         try
         {
+            // A stop request or queued removal can outlive a close/reopen or filter edit.
+            // The reservation blocks dispatch while we refresh immediately before removal.
+            var currentWorkflow = await workflowDefinitionProvider.GetCurrentAsync(cancellationToken);
+            var apiKey = Symphony.Infrastructure.Workflows.WorkflowDispatchPreflightValidator.ValidateAndResolveApiKey(currentWorkflow);
+            var states = await TryFetchIssueStatesByIdsAsync(currentWorkflow, apiKey, [issueId],
+                "workspace_cleanup_refresh_failed; retaining workspace for retry.", cancellationToken);
+            var state = states?.SingleOrDefault(item => item.Id == issueId);
+            if (state is null)
+            {
+                return;
+            }
+            if (!MatchesTerminalState(state.State, currentWorkflow.Runtime.Tracker.TerminalStates) &&
+                state.IsExecutionEligible(currentWorkflow.Runtime.Tracker.ActiveStates))
+            {
+                await ReleaseReopenedCleanupReservationAsync(issueId, instanceId, cancellationToken);
+                return;
+            }
+
+            // A large reconciliation batch can outlive its original poll lease. Renew
+            // before touching the filesystem, with room for bounded removal/teardown.
+            if (!await coordinationStore.AcquireOrRenewLeaseAsync(ResolveLeaseName(), instanceId,
+                    TimeSpan.FromSeconds(Math.Max(120, ResolveLeaseTtl().TotalSeconds)), cancellationToken) ||
+                !await dbContext.DispatchClaims.AsNoTracking().AnyAsync(claim => claim.IssueId == issueId &&
+                    claim.Status == "cleanup" && claim.ClaimedByInstanceId == instanceId, cancellationToken))
+            {
+                logger.LogWarning("workspace_cleanup_deferred: reservation or poll lease lost for {IssueId}.", issueId);
+                return;
+            }
+
             var result = await workspaceManager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest(
                 identifier, workflow.Runtime.Workspace.Root, workflow.Runtime.Workspace.SharedClonePath,
                 workflow.Runtime.Workspace.WorktreesRoot, workflow.Runtime.Hooks.BeforeRemove,

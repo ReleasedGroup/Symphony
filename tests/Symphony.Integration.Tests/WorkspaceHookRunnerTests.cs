@@ -8,6 +8,35 @@ namespace Symphony.Integration.Tests;
 public sealed class WorkspaceHookRunnerTests
 {
     [Fact]
+    [Trait("Spec", "17.3")]
+    public async Task Cancellation_ShouldWaitForOwnedChildToReleaseWorkspaceFile()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = Directory.CreateTempSubdirectory("symphony-child-lock-").FullName;
+        using var cancellation = new CancellationTokenSource();
+        var runner = new WorkspaceHookRunner(NullLogger<WorkspaceHookRunner>.Instance);
+        var script = "$f = [IO.File]::Open('owned.lock', 'Create', 'ReadWrite', 'None'); [IO.File]::WriteAllText('ready', 'yes'); Start-Sleep -Seconds 30";
+        var encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script));
+        var run = runner.RunHookAsync(new WorkspaceHookRequest("before_run",
+            $"powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}", root, 15000, "#1"), cancellation.Token);
+        try
+        {
+            for (var i = 0; i < 250 && !File.Exists(Path.Combine(root, "ready")) && !run.IsCompleted; i++)
+                await Task.Delay(20);
+            Assert.True(File.Exists(Path.Combine(root, "ready")), "Owned child must acquire the fixture lock.");
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+            using var reopened = new FileStream(Path.Combine(root, "owned.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        }
+        finally
+        {
+            cancellation.Cancel();
+            try { await run; } catch (OperationCanceledException) { }
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunHookAsync_ShouldExecuteMultilineScriptInWorkspace()
     {
         var workspace = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-hook-workspace"));

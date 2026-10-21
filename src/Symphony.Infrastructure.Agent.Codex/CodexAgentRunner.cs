@@ -113,6 +113,7 @@ public sealed partial class CodexAgentRunner(
             throw new InvalidOperationException($"Failed to start command '{request.Command}'.");
         }
 
+        await using var ownedProcess = new Symphony.Infrastructure.Processes.OwnedProcessLifetime(process);
         using var processCancellation = cancellationToken.Register(
             static state => TryKillProcess((Process)state!, out _), process);
 
@@ -225,6 +226,7 @@ public sealed partial class CodexAgentRunner(
             throw new InvalidOperationException($"Failed to start command '{request.Command}'.");
         }
 
+        await using var ownedProcess = new Symphony.Infrastructure.Processes.OwnedProcessLifetime(process);
         using var processCancellation = cancellationToken.Register(
             static state => TryKillProcess((Process)state!, out _), process);
 
