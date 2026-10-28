@@ -829,6 +829,16 @@ This prevents stale terminal workspaces from accumulating after restarts.
 
 ### 8.7 Terminal Issue State Retention
 
+Administrator policy: `workspace.cleanup.mode` defaults to `ineligible` (the existing
+behavior below). `terminal` restricts removal to configured terminal states;
+`retain` preserves workspaces and correlated local history. `workspace.cleanup.dry_run`
+defaults to false; true logs tracker-qualified candidates without removal hooks,
+workspace deletion or history purge. Reconciliation and stop/retry rules still run.
+Check the current policy before reservation and again before removal; preserve all
+active ownership, dirty-work and containment safeguards. Do not infer age-based
+expiry, successful-run deletion, or Codex thread cleanup from this policy.
+The cleanup/purge requirements below apply only when the policy permits removal.
+
 The same deferred cleanup lifecycle applies to retained issues that no longer match
 current active states, labels or milestone specifications. Recheck current eligibility
 before removal and preserve unknown, linked or dirty workspaces. See

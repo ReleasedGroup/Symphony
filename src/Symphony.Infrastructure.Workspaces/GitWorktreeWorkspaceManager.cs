@@ -406,6 +406,14 @@ public sealed class GitWorktreeWorkspaceManager(
                 throw new InvalidOperationException("Workspace reference belongs to a different registered worktree.");
             var status = await RunGitAsync(worktreePath, ["status", "--porcelain", "--untracked-files=all"],
                 cancellationToken, throwOnNonZeroExitCode: false);
+            // Branch refs are retained, but detached commits would lose their worktree anchor.
+            var branch = await RunGitAsync(worktreePath, ["symbolic-ref", "--quiet", "HEAD"],
+                cancellationToken, throwOnNonZeroExitCode: false);
+            if (branch.ExitCode != 0 || !branch.Stdout.Trim().StartsWith("refs/heads/", StringComparison.Ordinal))
+            {
+                logger.LogWarning("workspace_cleanup_preserved: detached or unreadable HEAD at {WorkspacePath}.", worktreePath);
+                return false;
+            }
             if (status.ExitCode != 0 || !string.IsNullOrWhiteSpace(status.Stdout))
             {
                 logger.LogWarning("workspace_cleanup_preserved: uncommitted files or unreadable Git status at {WorkspacePath}.", worktreePath);
