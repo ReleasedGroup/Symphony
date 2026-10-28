@@ -733,7 +733,8 @@ public sealed partial class OrchestrationTickServiceTests
             WorkflowDefinition workflowDefinition,
             FakeTrackerClient tracker,
             FakeIssueExecutionCoordinator coordinator,
-            ManagedLeaseOptions? managedLeaseOptions = null)
+            ManagedLeaseOptions? managedLeaseOptions = null,
+            IWorkflowDefinitionProvider? workflowProvider = null)
         {
             var dbPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-orchestration.db");
             var options = new DbContextOptionsBuilder<SymphonyDbContext>()
@@ -751,7 +752,7 @@ public sealed partial class OrchestrationTickServiceTests
             var leaseService = new ManagedLeaseService(dbContext, managedOptions, leaseRuntime, TimeProvider.System);
 
             var service = new OrchestrationTickService(
-                new FakeWorkflowDefinitionProvider(workflowDefinition),
+                workflowProvider ?? new FakeWorkflowDefinitionProvider(workflowDefinition),
                 tracker,
                 new OrchestrationCoordinationStore(dbContext, TimeProvider.System),
                 dbContext,

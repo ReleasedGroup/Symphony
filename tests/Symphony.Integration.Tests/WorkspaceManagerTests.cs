@@ -339,6 +339,20 @@ public sealed class WorkspaceManagerTests
             Assert.Equal("user work", await File.ReadAllTextAsync(uncommittedFile));
             File.Delete(uncommittedFile);
 
+            await RunGitAsync(prepare.WorkspacePath, ["checkout", "--detach"]);
+            var detached = await manager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest(
+                "#101", workspaceRoot, sharedClonePath, worktreesRoot, "echo cleanup", 1000));
+            Assert.False(detached.RemovedNow);
+            Assert.Empty(hookRunner.Requests);
+            await RunGitAsync(prepare.WorkspacePath, ["checkout", prepare.BranchName]);
+
+            // A local-only committed change survives cleanup in the retained branch.
+            await RunGitAsync(prepare.WorkspacePath, ["config", "user.name", "symphony-tests"]);
+            await RunGitAsync(prepare.WorkspacePath, ["config", "user.email", "symphony-tests@example.com"]);
+            await File.WriteAllTextAsync(Path.Combine(prepare.WorkspacePath, "unpublished.txt"), "local work");
+            await RunGitAsync(prepare.WorkspacePath, ["add", "unpublished.txt"]);
+            await RunGitAsync(prepare.WorkspacePath, ["commit", "-m", "unpublished work"]);
+
             var copied = Directory.CreateDirectory(Path.Combine(worktreesRoot, "102")).FullName;
             File.Copy(Path.Combine(prepare.WorkspacePath, ".git"), Path.Combine(copied, ".git"));
             await Assert.ThrowsAsync<InvalidOperationException>(() => manager.CleanupIssueWorkspaceAsync(
@@ -358,6 +372,8 @@ public sealed class WorkspaceManagerTests
             Assert.False(Directory.Exists(prepare.WorkspacePath));
             Assert.Single(hookRunner.Requests);
             Assert.Equal("before_remove", hookRunner.Requests[0].HookName);
+            var retained = await RunGitAsync(sharedClonePath, ["show", $"{prepare.BranchName}:unpublished.txt"]);
+            Assert.Equal("local work", retained.Stdout.Trim());
         }
         finally
         {

@@ -1,5 +1,23 @@
 # Workspace lifecycle cleanup
 
+## Administrator policy (new in this change)
+
+`workspace.cleanup.mode` accepts `retain` (leave workspace and local history),
+`terminal` (only confirmed terminal issues), or `ineligible` (default: existing
+cleanup of terminal and otherwise ineligible issues). The latter is the most
+aggressive safe mode; it never means force-delete or cleanup on successful exit.
+`workspace.cleanup.dry_run: true` reports tracker-qualified candidates without
+removal hooks, filesystem cleanup, or issue-history purge. Normal reconciliation
+still runs. Preview logs do not assert filesystem safety or absence of active owners.
+There is no automatic age/size limit. This policy does not change Codex session or
+native-agent retention. See [the full reference](WorkflowReference.md).
+
+Both gates are checked again using the current workflow immediately before removal.
+Clean detached-HEAD worktrees are preserved; their commits may lack a retained
+branch reference. Local unpublished commits on named branches remain in the shared clone.
+Disabling cleanup releases a stale cleanup reservation while respecting foreign
+leases. All existing filesystem/ownership checks remain mandatory.
+
 Implements SPEC sections 8.4–8.6, 9, 10, 15 and 17. State, label and milestone
 changes (including workflow filter edits) make retained work eligible for cleanup.
 Running workers are canceled first. Removal takes place during reconciliation after

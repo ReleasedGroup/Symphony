@@ -29,6 +29,11 @@ public sealed partial class OrchestrationTickService
         // reappear on a later SaveChanges. Reserve this issue in a short transaction
         // so hooks and filesystem operations cannot block unrelated database writers.
         await dbContext.SaveChangesAsync(cancellationToken);
+        if (!AllowsWorkspaceCleanup(workflow, observed.State, issueId))
+        {
+            await ReleaseReopenedCleanupReservationAsync(issueId, instanceId, cancellationToken);
+            return;
+        }
         await using (var reservation = await dbContext.Database.BeginTransactionAsync(cancellationToken))
         {
             if (await dbContext.Runs.AnyAsync(
@@ -95,6 +100,19 @@ public sealed partial class OrchestrationTickService
                 return;
             }
 
+            if (!AllowsWorkspaceCleanup(currentWorkflow, state.State, issueId))
+            {
+                await ReleaseReopenedCleanupReservationAsync(issueId, instanceId, cancellationToken);
+                return;
+            }
+
+            // Do not apply a reservation to a different filesystem after a workflow edit.
+            if (currentWorkflow.Runtime.Workspace != workflow.Runtime.Workspace)
+            {
+                logger.LogInformation("workspace_cleanup_deferred: workspace settings changed for {IssueId}.", issueId);
+                return;
+            }
+
             // A large reconciliation batch can outlive its original poll lease. Renew
             // before touching the filesystem, with room for bounded removal/teardown.
             if (!await coordinationStore.AcquireOrRenewLeaseAsync(ResolveLeaseName(), instanceId,
@@ -108,8 +126,8 @@ public sealed partial class OrchestrationTickService
 
             var result = await workspaceManager.CleanupIssueWorkspaceAsync(new WorkspaceCleanupRequest(
                 identifier, workflow.Runtime.Workspace.Root, workflow.Runtime.Workspace.SharedClonePath,
-                workflow.Runtime.Workspace.WorktreesRoot, workflow.Runtime.Hooks.BeforeRemove,
-                workflow.Runtime.Hooks.TimeoutMs), cancellationToken);
+                workflow.Runtime.Workspace.WorktreesRoot, currentWorkflow.Runtime.Hooks.BeforeRemove,
+                currentWorkflow.Runtime.Hooks.TimeoutMs), cancellationToken);
             if (result.Existed && !result.RemovedNow)
             {
                 logger.LogWarning("terminal_issue_cleanup_deferred: workspace remains for {IssueId} {IssueIdentifier}.",
@@ -218,6 +236,21 @@ public sealed partial class OrchestrationTickService
         // Emit to structured operational logging, not the issue event table being purged.
         logger.LogInformation("terminal_issue_state_purged for {IssueId} {IssueIdentifier}. RunCount={RunCount}",
             issueId, identifier, relatedRunIds.Count);
+    }
+
+    private bool AllowsWorkspaceCleanup(WorkflowDefinition workflow, string state, string issueId)
+    {
+        var settings = workflow.Runtime.Workspace;
+        var allowed = settings.CleanupMode == "ineligible" ||
+            (settings.CleanupMode == "terminal" && MatchesTerminalState(state, workflow.Runtime.Tracker.TerminalStates));
+        if (!allowed || settings.CleanupDryRun)
+        {
+            logger.LogInformation(
+                "workspace_cleanup_policy: IssueId={IssueId} Mode={Mode} DryRun={DryRun} Candidate={Candidate}; workspace and history retained. Safety checks have not been evaluated.",
+                issueId, settings.CleanupMode, settings.CleanupDryRun, allowed);
+            return false;
+        }
+        return true;
     }
 
     private async Task ReleaseReopenedCleanupReservationAsync(string issueId, string instanceId, CancellationToken cancellationToken)

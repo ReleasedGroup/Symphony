@@ -36,7 +36,9 @@ public sealed record WorkflowWorkspaceSettings(
     string SharedClonePath,
     string WorktreesRoot,
     string BaseBranch,
-    string? RemoteUrl);
+    string? RemoteUrl,
+    string CleanupMode = "ineligible",
+    bool CleanupDryRun = false);
 
 public sealed record WorkflowHooksSettings(
     string? AfterCreate,

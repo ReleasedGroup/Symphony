@@ -1,5 +1,9 @@
 # Symphony Package Guide
 
+For an existing WSL installation, follow the [WSL upgrade guide](WslUpgradeGuide.md)
+to preserve configuration, SQLite state, and Git worktree paths. First-run setup
+below is not an in-place upgrade procedure.
+
 ## Release Bundles
 
 GitHub Releases now build versioned bundles for:

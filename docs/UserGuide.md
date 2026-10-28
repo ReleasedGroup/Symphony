@@ -91,6 +91,11 @@ The checked-in workflow has `after_create` and `before_run` set to `null`; Symph
 
 Symphony reads its runtime behavior from [`WORKFLOW.md`](../WORKFLOW.md).
 
+See the [complete WORKFLOW.md reference](WorkflowReference.md) for every supported
+option, defaults, validation, prompt variables and reload behavior. See the
+[WSL upgrade guide](WslUpgradeGuide.md) for preserving configuration and state
+when installing a new release.
+
 When you use `dotnet run --project src/Symphony.Host`, the default SQLite file path from `appsettings.json` is created under `src/Symphony.Host/data/` if it is missing.
 
 Important settings:
@@ -181,7 +186,7 @@ For Codex app-server runs, Symphony:
 - keeps parsing strictly on stdout only
 - treats stderr as diagnostics only
 
-For label-gated workflows, the agent can remove the execution label after implementing, verifying, pushing, and opening a PR. Symphony checks the same label and milestone filters between turns, during running-issue reconciliation, and before scheduling a successful continuation retry. All configured labels must still be present (case-insensitive); milestones match by title or number. Losing eligibility stops continuation and releases the claim without deleting the workspace. The issue and PR may remain open for human review; Symphony does not remove labels, close issues, or merge PRs on its own. Workflows without label or milestone filters retain their existing state-based behavior. Persisted retries are checked against current candidates before dispatch after a restart.
+For label-gated workflows, the agent can remove the execution label after implementing, verifying, pushing, and opening a PR. Symphony checks the same label and milestone filters between turns, during running-issue reconciliation, and before scheduling a successful continuation retry. All configured labels must still be present (case-insensitive); milestones match by title or number. Losing eligibility stops continuation and releases the worker claim. Reconciliation then applies the configured workspace cleanup policy after finalization; dirty or otherwise unsafe workspaces are preserved. The issue and PR may remain open for human review; Symphony does not remove labels, close issues, or merge PRs on its own. Workflows without label or milestone filters retain their existing state-based behavior. Persisted retries are checked against current candidates before dispatch after a restart.
 
 ### Approval and Tool Policy
 

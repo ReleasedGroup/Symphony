@@ -199,6 +199,14 @@ public sealed class WorkflowLoader
         var worktreesRoot = GetResolvedPathLikeValue(workspaceMap, "worktrees_root", "./workspaces/worktrees");
         var baseBranch = GetOptionalStringFromOptionalMap(workspaceMap, "base_branch") ?? "main";
         var remoteUrl = GetOptionalStringFromOptionalMap(workspaceMap, "remote_url");
+        var cleanupMap = workspaceMap is null ? null : GetOptionalMap(workspaceMap, "cleanup");
+        var cleanupMode = (GetOptionalStringFromOptionalMap(cleanupMap, "mode") ?? "ineligible").ToLowerInvariant();
+        if (cleanupMode is not ("retain" or "terminal" or "ineligible"))
+        {
+            throw new WorkflowLoadException("invalid_workspace_cleanup_mode",
+                "workspace.cleanup.mode must be retain, terminal, or ineligible.");
+        }
+        var cleanupDryRun = cleanupMap is not null && GetOptionalBoolean(cleanupMap, "dry_run", false);
 
         if (string.IsNullOrWhiteSpace(baseBranch))
         {
@@ -282,7 +290,9 @@ public sealed class WorkflowLoader
                 sharedClonePath,
                 worktreesRoot,
                 baseBranch,
-                remoteUrl),
+                remoteUrl,
+                cleanupMode,
+                cleanupDryRun),
             new WorkflowHooksSettings(
                 hooksAfterCreate,
                 hooksBeforeRun,
