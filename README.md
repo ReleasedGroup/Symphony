@@ -26,6 +26,8 @@ Container deployment guidance and sample artifacts are in [docs/ContainerGuide.m
 
 Release bundle installation guidance is in [docs/PackageGuide.md](docs/PackageGuide.md).
 
+For an Entra-protected Azure Marketplace installation, see the [Azure solution template pilot](deploy/azure-marketplace/README.md).
+
 ## Runtime Behavior
 
 - A Tailwind-powered dashboard now renders orchestration health, live agent activity, tracked issue distribution, rate limits, leases, and per-issue drill-down from the durable API state.
