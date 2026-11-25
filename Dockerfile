@@ -10,6 +10,7 @@ ARG CODEX_NPM_VERSION=0.135.0
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl git nodejs npm openssh-client \
     && npm install -g @openai/codex@${CODEX_NPM_VERSION} \
+    && codex --version \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --home-dir /home/symphony --shell /bin/bash symphony \

@@ -21,6 +21,14 @@ SQLite and Git worktrees stay on local managed-disk-backed storage, not an Azure
    - A distinct high-entropy managed lease signing secret of at least 32 characters, known to the independently authorised signing controller. Do not reuse the GitHub or Codex secret. The guest bootstrap does not log secret values.
 6. Use tested Linux/amd64 image **digests** for Symphony (built from this fork's Dockerfile), Caddy 2 and OAuth2 Proxy v7.15.6 or later supported v7. Use approved pullable repositories without credentials embedded in image URIs. For example, build with `docker build --platform linux/amd64 -t <approved-registry>/symphony:<release> .` and use the repository digest from your authorised image publication. Supplying a digest does not validate the publisher; independently verify provenance, scan findings and licence/Marketplace policy before publication. Private-registry login is not implemented in this plan. No image or Marketplace offer is published by this package.
 
+## Codex CLI configuration and authentication
+
+The digest-pinned Symphony image includes Codex CLI. The VM provisions a read-only `/home/symphony/.codex/config.toml` and sets `CODEX_HOME` explicitly. It selects the OpenAI provider and API-key login, keeps workspace-write with shell network access off, and filters deployment secrets out of Codex's child shell environment. Symphony's lease and issue-label checks are unchanged.
+
+In the Azure wizard, enter the HTTPS Key Vault **secret URI** in **Codex API key secret URL**. Use an approved OpenAI Platform project key for this deployment, not a personal ChatGPT login. Startup checks the CLI and configuration offline without credentials, then the VM identity reads the secret and supplies it to the engine as `OPENAI_API_KEY`. It does not write the key to `config.toml`, save a Codex login, or put the value into ARM parameters. Host root and Docker administrators are trusted; Docker's container metadata can expose environment variables to those administrators. Do not share raw container inspection output. Shell filtering is not a new isolation boundary.
+
+The offline preflight proves the CLI is present and can load the configuration; it does not validate the key, quota or model access. Verify those only with an explicitly approved task in the disposable lab. An absent, unreadable or malformed Key Vault secret fails startup. For rotation, point at a new version using the approved maintenance plan, or rotate the value of an unversioned reference and perform a controlled restart.
+
 ## Configure and package
 
 From the repository root:
