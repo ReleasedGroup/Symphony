@@ -14,6 +14,8 @@ VAULT = '2024-11-01'
 IDENTITY_TYPE = 'Microsoft.ManagedIdentity/userAssignedIdentities'
 VAULT_TYPE = 'Microsoft.KeyVault/vaults'
 VAULT_ACCESS_ROLE = '4633458b-17de-408a-b874-0445c86b69e6'
+LEASE_WRITER_ROLE = 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
+SCRIPT_TYPE = 'Microsoft.Resources/deploymentScripts'
 SECRET_INPUTS = {
     'githubSecret': ('githubToken', 'github-token', 'GitHub fine-grained token'),
     'codexSecret': ('codexApiKey', 'codex-api-key', 'OpenAI project API key'),
@@ -91,13 +93,15 @@ def resources():
     new = f"equals({p('credentialMode')}, 'provision')"
     identity = rid(IDENTITY_TYPE, 'managedIdentity')
     vault = rid(VAULT_TYPE, 'vault')
+    generate = f"and({new}, equals({p('leaseKeyMode')}, 'generate'))"
+    supplied_lease = f"and({new}, equals({p('leaseKeyMode')}, 'supplied'))"
     resolved_identity = f"if({new}, {identity}, {p('identityResourceId')})"
     yield res(IDENTITY_TYPE, IDENTITY, v('managedIdentity'), {}, condition=expr(new))
-    yield res(VAULT_TYPE, VAULT, v('vault'), dict(
+    vault_properties = dict(
         tenantId=expr('subscription().tenantId'), sku=dict(family='A', name='standard'), accessPolicies=[],
         enableRbacAuthorization=True, enableSoftDelete=True, enablePurgeProtection=True,
-        enabledForTemplateDeployment=False, enabledForDeployment=False, enabledForDiskEncryption=False),
-        condition=expr(new))
+        enabledForTemplateDeployment=False, enabledForDeployment=False, enabledForDiskEncryption=False)
+    yield res(VAULT_TYPE, VAULT, v('vault'), vault_properties, condition=expr(new))
     role = f"guid({vault}, {identity}, '{VAULT_ACCESS_ROLE}')"
     yield dict(type='Microsoft.Authorization/roleAssignments', apiVersion='2022-04-01',
         name=expr(role), condition=expr(new), scope=expr(f"concat('{VAULT_TYPE}/', {v('vault')})"),
@@ -106,12 +110,36 @@ def resources():
             principalType='ServicePrincipal',
             principalId=expr(f"if({new}, reference({identity}, '{IDENTITY}').principalId, null())")))
     vault_ready = [f"extensionResourceId({vault}, 'Microsoft.Authorization/roleAssignments', {role})"]
-    for value, name, _ in SECRET_INPUTS.values():
+    for key, (value, name, _) in SECRET_INPUTS.items():
         typ = f'{VAULT_TYPE}/secrets'
-        yield dict(type=typ, apiVersion=VAULT, condition=expr(new),
+        yield dict(type=typ, apiVersion=VAULT, condition=expr(supplied_lease if key == 'leaseSecret' else new),
             name=expr(f"concat({v('vault')}, '/{name}')"), dependsOn=[expr(vault)],
             properties=dict(value=expr(p(value))))
         vault_ready.append(f"resourceId('{typ}', {v('vault')}, '{name}')")
+    # Give the bootstrap an independent read grant, and the temporary script
+    # a write grant limited to a dedicated vault that holds only the lease key.
+    lease_vault = rid(VAULT_TYPE, 'leaseVault')
+    writer = rid(IDENTITY_TYPE, 'leaseWriter')
+    yield res(VAULT_TYPE, VAULT, v('leaseVault'), vault_properties, condition=expr(generate))
+    yield res(IDENTITY_TYPE, IDENTITY, v('leaseWriter'), {}, condition=expr(generate))
+    lease_roles = []
+    for principal, role_id in [(writer, LEASE_WRITER_ROLE), (identity, VAULT_ACCESS_ROLE)]:
+        name = f"guid({lease_vault}, {principal}, '{role_id}')"
+        yield dict(type='Microsoft.Authorization/roleAssignments', apiVersion='2022-04-01',
+            name=expr(name), condition=expr(generate),
+            scope=expr(f"concat('{VAULT_TYPE}/', {v('leaseVault')})"),
+            dependsOn=[expr(lease_vault), expr(principal)], properties=dict(
+                roleDefinitionId=expr(f"subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '{role_id}')"),
+                principalType='ServicePrincipal',
+                principalId=expr(f"if({generate}, reference({principal}, '{IDENTITY}').principalId, null())")))
+        lease_roles.append(f"extensionResourceId({lease_vault}, 'Microsoft.Authorization/roleAssignments', {name})")
+    yield res(SCRIPT_TYPE, '2023-08-01', v('leaseScript'), dict(
+        azCliVersion='2.85.0', timeout='PT15M', cleanupPreference='Always', retentionInterval='P1D',
+        environmentVariables=[dict(name='SYMPHONY_LEASE_VAULT', value=expr(v('leaseVault')))],
+        scriptContent=(ROOT / 'provision_lease_key.sh').read_text()),
+        (lease_vault, writer, lease_roles[0]), kind='AzureCLI', condition=expr(generate),
+        identity={'type': 'UserAssigned', 'userAssignedIdentities': expr(f'createObject({writer}, createObject())')})
+    vault_ready.extend((rid(SCRIPT_TYPE, 'leaseScript'), lease_roles[1]))
     # Azure generates the key after Review + create. If the portal supplies
     # only the new resource ID, read its public property (never generate in ARM).
     supplied = p('sshPublicKey')
@@ -153,6 +181,9 @@ def resources():
         **{key: f"if({new}, concat('https://', {v('vault')}, '.vault.azure.net/secrets/{name}'), {p(key)})"
            for key, (_, name, _) in SECRET_INPUTS.items()},
     }
+    generated_uri = f"concat('https://', {v('leaseVault')}, '.vault.azure.net/secrets/lease-signing-key')"
+    config['leaseSecret'] = (f"if({generate}, {generated_uri}, "
+                             f"if({supplied_lease}, {config['leaseSecret']}, {p('leaseSecret')}))")
     kv = ', '.join(f"'{key}', {value}" for key,value in config.items())
     prefix = base64.b64encode(b"#!/bin/bash\nexport SYMPHONY_CONFIG_B64='").decode()
     suffix = base64.b64encode(b"'\n").decode()
@@ -177,6 +208,9 @@ def main_template():
     params['recoverySshKeyResourceId'] = dict(type='string', defaultValue='',
         metadata=dict(description='Azure SSH public key resource ID. Used only if no public key text is supplied.'))
     params['credentialMode'] = dict(type='string', defaultValue='existing', allowedValues=['provision', 'existing'])
+    params['leaseKeyMode'] = dict(type='string', defaultValue='supplied',
+        allowedValues=['generate', 'existing', 'supplied'],
+        metadata=dict(description='Generate in a dedicated vault, use an existing secret URI, or supply the legacy secure parameter.'))
     for key, (value, _, label) in SECRET_INPUTS.items():
         params[key]['defaultValue'] = ''
         params[value] = dict(type='secureString', defaultValue='', metadata=dict(description=label))
@@ -184,6 +218,8 @@ def main_template():
     n = lambda suffix: expr(f"concat('sym-', uniqueString(resourceGroup().id), '-{suffix}')")
     variables = {name: n(name) for name in ['nsg','ip','vnet','nic','vm']}
     variables.update(managedIdentity=n('identity'), vault=expr("concat('sym', uniqueString(resourceGroup().id))"))
+    variables.update(leaseVault=expr("concat('symlease', uniqueString(resourceGroup().id))"),
+                     leaseWriter=n('lease-writer'), leaseScript=n('lease-key-init'))
     # Use the deterministic name to register the callback before install.
     variables['fqdn'] = expr(f"concat({p('dnsLabel')}, '.', {p('location')}, '.cloudapp.azure.com')")
     variables['bootstrap'] = base64.b64encode((ROOT/'bootstrap.sh').read_bytes()).decode()
@@ -193,6 +229,9 @@ def main_template():
                        ('entraRedirectUri','/oauth2/callback')]:
         outputs[name] = dict(type='string', value=expr(f"{base}, '{path}')"))
     outputs['vmName'] = dict(type='string', value=expr(v('vm')))
+    outputs['generatedLeaseSecretUri'] = dict(type='string', condition=expr(
+        f"and(equals({p('credentialMode')}, 'provision'), equals({p('leaseKeyMode')}, 'generate'))"),
+        value=expr(f"concat('https://', {v('leaseVault')}, '.vault.azure.net/secrets/lease-signing-key')"))
     return {'$schema': 'https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#',
             'contentVersion':'1.0.0.0','parameters':params,'variables':variables,
             'resources':list(resources()),'outputs':outputs}
@@ -221,6 +260,18 @@ def ui():
             dict(label='Create dedicated identity and vault', value='provision'),
             dict(label='Use existing identity and vault references', value='existing')])))
     outputs['credentialMode'] = expr(mode)
+    lease_mode = "steps('identity').leaseKeyMode"
+    use_lease = f"or({existing}, equals({lease_mode}, 'existing'))"
+    id_step.append(dict(name='leaseKeyMode', type='Microsoft.Common.DropDown',
+        label='Managed lease signing key', defaultValue='Generate a new key',
+        toolTip='Generate once for a new controller, or reuse a secret that this deployment identity can read.',
+        visible=expr(new), constraints=dict(required=expr(new), allowedValues=[
+            dict(label='Generate a new key', value='generate'),
+            dict(label='Use existing Key Vault secret', value='existing')])))
+    id_step.append(dict(name='leaseKeyHelp', type='Microsoft.Common.InfoBox', options=dict(icon='Info',
+        text='Azure stores a generated key in Key Vault and exposes only its URI. Separately configure your signing controller to read that secret before dispatching work.'),
+        visible=expr(f"and({new}, equals({lease_mode}, 'generate'))")))
+    outputs['leaseKeyMode'] = expr(f"if({existing}, 'existing', {lease_mode})")
     for key, (label, tip, value, pattern, step) in SPECS.items():
         if key == 'sshPublicKey':
             name = 'recoverySsh'
@@ -245,11 +296,15 @@ def ui():
         call = f"steps('{step}').{key}"
         outputs[key] = expr(f'int({call})' if key in INTEGERS else call)
         if key == 'identityResourceId' or key in SECRET_INPUTS:
-            text['visible'] = expr(existing)
-            text['constraints']['required'] = expr(existing)
-            outputs[key] = expr(f"if({existing}, {call}, '')")
+            show = use_lease if key == 'leaseSecret' else existing
+            text['visible'] = expr(show)
+            text['constraints']['required'] = expr(show)
+            outputs[key] = expr(f"if({show}, {call}, '')")
     for key, (value, _, label) in SECRET_INPUTS.items():
-        length = 32 if key == 'leaseSecret' else 1
+        if key == 'leaseSecret':
+            outputs[value] = ''
+            continue
+        length = 1
         id_step.append(dict(name=value, type='Microsoft.Common.PasswordBox',
             label=dict(password=label, confirmPassword=f'Confirm {label}'),
             toolTip='Enter a credential issued for this deployment. Azure stores it in the dedicated vault.',
