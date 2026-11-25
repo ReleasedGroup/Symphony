@@ -41,7 +41,7 @@ Use an Azure CLI user with delegated app registration, group and enterprise app 
 
 ## Codex CLI configuration and authentication
 
-The digest-pinned Symphony image includes Codex CLI. The VM provisions a read-only `/home/symphony/.codex/config.toml` and sets `CODEX_HOME` explicitly. It selects the OpenAI provider and API-key login, keeps workspace-write with shell network access off, and filters deployment secrets out of Codex's child shell environment. Symphony's lease and issue-label checks are unchanged.
+The digest-pinned Symphony image includes Codex CLI. The VM provisions a read-only `/home/symphony/.codex/config.toml` and sets `CODEX_HOME` explicitly. A distinct Responses API provider reads `OPENAI_API_KEY` directly in app-server, without relying on a saved Codex login. It keeps workspace-write with shell network access off and filters deployment secrets out of Codex's child shell environment. Symphony's lease and issue-label checks are unchanged.
 
 In the Azure wizard, enter either a project API key in the masked vault-provisioning field or its HTTPS Key Vault **secret URI** in **Codex API key secret URL**. Use an approved OpenAI Platform project key, not a personal ChatGPT login. Startup checks the CLI and configuration offline without credentials, then the VM identity reads the secret and supplies it to the engine as `OPENAI_API_KEY`. It does not write the key to `config.toml` or save a Codex login. Host root and Docker administrators are trusted; Docker's container metadata can expose environment variables to those administrators. Do not share raw container inspection output. Shell filtering is not a new isolation boundary.
 
