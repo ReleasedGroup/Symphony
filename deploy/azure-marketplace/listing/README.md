@@ -14,7 +14,7 @@ Deploy Symphony in your Azure subscription. Run Codex-assisted GitHub work for o
 
 ## Description
 
-Symphony for Azure is Released's deployment package for teams that want to run Codex-assisted software delivery in their own Azure subscription. The solution template provisions an isolated Ubuntu host and starts Symphony with an HTTPS dashboard and API protected by Microsoft Entra ID.
+Symphony for Azure is Released's deployment package for teams that want to run Codex-assisted software delivery in their own Azure subscription. The Community plan deploys an Azure Managed application in the customer's subscription. It provisions a dedicated Ubuntu host and starts Symphony with an HTTPS dashboard and API protected by Microsoft Entra ID.
 
 Configure a GitHub repository, base branch, required issue labels and workload limits at deployment. Operators in your designated Entra group can review runtime status through the portal and use the protected API. Azure Key Vault provides access to the configured credentials through a managed identity.
 
@@ -52,7 +52,7 @@ Capture genuine 1280 × 720 PNGs using synthetic fixtures. Frame each view to ex
 
 Use a disposable test resource group, a synthetic repository, and test identities representing an operator group member and a non-member.
 
-1. Open the solution template. Confirm required wizard fields are validated and the default image reference includes a SHA-256 digest.
+1. Open the Community plan’s Managed application deployment wizard. Confirm required wizard fields are validated and the default image reference includes a SHA-256 digest.
 2. Record the deployment result. For a successful deployment, use the generated portal and API addresses to verify HTTPS and the configured redirect URI.
 3. Check the portal and API while signed out, as a test operator, and as a test non-member. Verify only the operator can read operational data.
 4. Confirm the service starts idle without a managed lease. In an authorized test fixture, compare two synthetic issues, one with all required labels and one missing a label. Record lease-gated behaviour only for cases actually exercised.
