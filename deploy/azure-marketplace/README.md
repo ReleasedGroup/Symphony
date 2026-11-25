@@ -22,7 +22,13 @@ SQLite and Git worktrees stay on local managed-disk-backed storage, not an Azure
    - An approved OpenAI API key issued by the operator's [OpenAI Platform project](https://platform.openai.com/api-keys). Use a dedicated budgeted project. The wizard stores the value; it does not mint either provider's credential.
    - The Entra web application client secret.
    - A dedicated managed lease signing key shared with your authorised signing controller. For a new deployment the wizard generates it by default; to attach to an existing controller, supply its Key Vault secret URI. Do not reuse the GitHub or Codex secret.
-6. Use tested Linux/amd64 image **digests** for Symphony (built from this fork's Dockerfile), Caddy 2 and OAuth2 Proxy v7.15.6 or later supported v7. Use approved pullable repositories without credentials embedded in image URIs. For example, build with `docker build --platform linux/amd64 -t <approved-registry>/symphony:<release> .` and use the repository digest from your authorised image publication. Supplying a digest does not validate the publisher; independently verify provenance, scan findings and licence/Marketplace policy before publication. Private-registry login is not implemented in this plan. No image or Marketplace offer is published by this package.
+6. The wizard pre-fills the official, digest-pinned Linux/amd64 Caddy 2 and OAuth2 Proxy v7.15.6 images. The release ZIP also pre-fills the exact Symphony image published by CD to GHCR. A ZIP built locally or in PR CI does not guess a Symphony digest; supply your reviewed image reference or build the ZIP with `--symphony-image ghcr.io/owner/repository@sha256:<digest>`. All three fields are editable and require digest references. This template does not log in to private registries.
+
+## Release image and Marketplace ZIP
+
+Publishing a GitHub release runs Linux and Windows validation, builds the Linux/amd64 Symphony image with Git, GitHub CLI (`gh`), Node.js, npm and the pinned Codex CLI, smoke-tests it as the unprivileged container user without network access, then pushes it to `ghcr.io/releasedgroup/symphony:<release-tag>`. The generated Marketplace ZIP defaults to the exact pushed digest only after the registry accepts an anonymous read and the same image passes its smoke test. The release carries the ZIP, its checksum, and `symphony-container-image.txt` containing the pinned reference.
+
+On the first release, confirm the GHCR package is authorised for public distribution and make that **package** public if needed. Repository visibility does not set package visibility. If initial publication pushes a private package, the workflow stops before publishing the ZIP; after the package settings are corrected, rerun the failed jobs. A push to a branch or PR builds and smoke-tests the image on CI but does not push it to a registry. This workflow does not update or publish the Marketplace listing.
 
 ## Managed lease signing key
 

@@ -3,6 +3,7 @@
 import argparse
 import base64
 import json
+import re
 from pathlib import Path
 import zipfile
 
@@ -16,6 +17,9 @@ VAULT_TYPE = 'Microsoft.KeyVault/vaults'
 VAULT_ACCESS_ROLE = '4633458b-17de-408a-b874-0445c86b69e6'
 LEASE_WRITER_ROLE = 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
 SCRIPT_TYPE = 'Microsoft.Resources/deploymentScripts'
+# Official upstream Linux/amd64 manifests, verified in their registries.
+CADDY_IMAGE = 'docker.io/library/caddy@sha256:fc9cbc100585871d18d4e451cca7021785c90a7006087427ae5ceb3e4efe6424'
+OAUTH_IMAGE = 'quay.io/oauth2-proxy/oauth2-proxy@sha256:01da265f8e371e6d3043b97829e171f3e4d53f9dc3817be15fb4fc29c92fe2a6'
 SECRET_INPUTS = {
     'githubSecret': ('githubToken', 'github-token', 'GitHub fine-grained token'),
     'codexSecret': ('codexApiKey', 'codex-api-key', 'OpenAI project API key'),
@@ -41,8 +45,8 @@ SPECS = {
     'stallSeconds': ('Stall timeout in seconds', '30 to 3600 seconds and no greater than the turn timeout.', '300', r'^[1-9][0-9]{1,3}$', 'workflow'),
     'maxAgents': ('Maximum concurrent agents', 'One to five on this single-VM plan.', '1', r'^[1-5]$', 'workflow'),
     'symphonyImage': ('Symphony container image', 'Trusted, accessible Linux/amd64 registry image with @sha256 digest. Build from the reviewed fork.', None, None, 'images'),
-    'caddyImage': ('Caddy container image', 'Trusted, accessible Linux/amd64 Caddy 2 image with @sha256 digest.', None, None, 'images'),
-    'oauthImage': ('OAuth2 Proxy container image', 'Trusted, accessible Linux/amd64 image with @sha256 digest and the documented flags.', None, None, 'images'),
+    'caddyImage': ('Caddy container image', 'Trusted, accessible Linux/amd64 Caddy 2 image with @sha256 digest.', CADDY_IMAGE, None, 'images'),
+    'oauthImage': ('OAuth2 Proxy container image', 'Trusted, accessible Linux/amd64 image with @sha256 digest and the documented flags.', OAUTH_IMAGE, None, 'images'),
 }
 SECRET = r'^https://[a-z0-9-]{3,24}\.vault\.azure\.net/secrets/[A-Za-z0-9-]{1,127}(/[0-9a-fA-F]{32})?$'
 IMAGE = r'^[a-z0-9]+([.:-][a-z0-9]+)+(/[a-z0-9]+([._-][a-z0-9]+)*)+@sha256:[a-f0-9]{64}$'
@@ -194,7 +198,7 @@ def resources():
         treatFailureAsDeploymentFailure=True), (vm, *vault_ready))
 
 
-def main_template():
+def main_template(symphony_image=None):
     params = dict(location=dict(type='string', defaultValue=expr('resourceGroup().location'),
                                metadata=dict(description='Azure public-cloud deployment region.')))
     for key, (label, tip, value, _, _) in SPECS.items():
@@ -204,6 +208,8 @@ def main_template():
         if value is not None:
             param['defaultValue'] = int(value) if key in INTEGERS else value
         params[key] = param
+    if symphony_image:
+        params['symphonyImage']['defaultValue'] = symphony_image
     params['sshPublicKey']['defaultValue'] = ''
     params['recoverySshKeyResourceId'] = dict(type='string', defaultValue='',
         metadata=dict(description='Azure SSH public key resource ID. Used only if no public key text is supplied.'))
@@ -237,7 +243,7 @@ def main_template():
             'resources':list(resources()),'outputs':outputs}
 
 
-def ui():
+def ui(symphony_image=None):
     steps = {
         'hosting': ('Hosting', 'One Ubuntu VM with a durable managed OS disk and HTTPS ingress.'),
         'identity': ('Entra and Key Vault', 'Choose a new dedicated managed identity and vault, or reuse existing references.'),
@@ -290,6 +296,8 @@ def ui():
         pattern = pattern or (IMAGE if key.endswith('Image') else SECRET)
         text = dict(name=key,type='Microsoft.Common.TextBox',label=label,toolTip=tip,
                     constraints=dict(required=True,regex=pattern,validationMessage=f'Enter a valid {label.lower()}.'))
+        if key == 'symphonyImage' and symphony_image:
+            value = symphony_image
         if value is not None:
             text['defaultValue'] = value
         built[step]['elements'].append(text)
@@ -318,18 +326,25 @@ def ui():
                               basics=[],steps=list(built.values()),outputs=outputs)}
 
 
-def files():
+def files(symphony_image=None):
+    if symphony_image is not None and not re.fullmatch(IMAGE, symphony_image):
+        raise ValueError('Symphony image must be specified as registry/repository@sha256:<64 hex characters>.')
     return {name: (json.dumps(data,ensure_ascii=True,indent=2)+'\n').encode('utf-8') for name,data in
-            [('mainTemplate.json',main_template()),('createUiDefinition.json',ui())]}
+            [('mainTemplate.json', main_template(symphony_image)), ('createUiDefinition.json', ui(symphony_image))]}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out',type=Path, required=True)
+    parser.add_argument('--symphony-image', help='Verified release image reference, including @sha256 digest.')
     args = parser.parse_args()
+    try:
+        payloads = files(args.symphony_image)
+    except ValueError as error:
+        parser.error(str(error))
     args.out.mkdir(parents=True,exist_ok=True)
     with zipfile.ZipFile(args.out/'symphony-marketplace.zip','w',compression=zipfile.ZIP_DEFLATED) as archive:
-        for name, payload in files().items():
+        for name, payload in payloads.items():
             (args.out/name).write_bytes(payload)
             entry = zipfile.ZipInfo(name,date_time=(2020,1,1,0,0,0))
             entry.compress_type = zipfile.ZIP_DEFLATED

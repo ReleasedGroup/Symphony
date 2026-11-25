@@ -6,11 +6,15 @@ on:
       - published
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, windows-latest]
 
     steps:
       - name: Checkout
@@ -68,8 +72,10 @@ jobs:
       - name: Derive release version
         id: version
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          $tag = '${{ github.event.release.tag_name }}'
+          $tag = $env:RELEASE_TAG
           if ($tag.StartsWith('v', [System.StringComparison]::OrdinalIgnoreCase)) {
             $tag = $tag.Substring(1)
           }
@@ -159,8 +165,64 @@ jobs:
             ${{ steps.archive.outputs.archive_path }}
             ${{ steps.archive.outputs.checksum_path }}
 
-  package-azure-marketplace:
+  publish-container:
     needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build, verify and push the release container
+        id: image
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ && ${#RELEASE_TAG} -le 128 ]]
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tagged="$repository:$RELEASE_TAG"
+          docker build --platform linux/amd64 --tag "$tagged" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$RELEASE_TAG" .
+          bash deploy/container/smoke-test.sh "$tagged"
+
+          signed_in=$(mktemp -d)
+          anonymous=$(mktemp -d)
+          trap 'rm -rf -- "$signed_in" "$anonymous"' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker --config "$signed_in" login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          unset GHCR_TOKEN
+          docker --config "$signed_in" push "$tagged"
+          ref=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tagged" |
+            awk -v repo="$repository" 'index($0, repo "@sha256:") == 1 {print}')
+          [[ "${ref#"$repository"@}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          # Send no GitHub credentials. Verify the registry serves the exact
+          # manifest to an anonymous pull token before creating a public ZIP.
+          if ! pull_token=$(curl -fsS --get 'https://ghcr.io/token' \
+            --data-urlencode 'service=ghcr.io' \
+            --data-urlencode "scope=repository:${repository#ghcr.io/}:pull" | jq -er '.token') ||
+            ! curl -fsS --head \
+              -H "Authorization: Bearer $pull_token" \
+              -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/${repository#ghcr.io/}/manifests/${ref##*@}" > /dev/null; then
+            echo '::error::The Azure VM needs an anonymously pullable image. Check the GHCR package visibility and rerun. The Marketplace ZIP was not published.'
+            exit 1
+          fi
+          docker --config "$anonymous" pull --platform linux/amd64 "$ref"
+          bash deploy/container/smoke-test.sh "$ref"
+          printf 'image=%s\n' "$ref" >> "$GITHUB_OUTPUT"
+
+  package-azure-marketplace:
+    needs: [validate, publish-container]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -174,8 +236,11 @@ jobs:
         run: python3 -m unittest -v
 
       - name: Build Azure Marketplace package
+        env:
+          SYMPHONY_IMAGE: ${{ needs.publish-container.outputs.image }}
         run: |
-          python3 deploy/azure-marketplace/package.py --out artifacts/marketplace
+          python3 deploy/azure-marketplace/package.py --out artifacts/marketplace --symphony-image "${SYMPHONY_IMAGE:?Missing published image digest}"
+          printf '%s\n' "$SYMPHONY_IMAGE" > artifacts/marketplace/symphony-container-image.txt
           cd artifacts/marketplace
           sha256sum symphony-marketplace.zip > symphony-marketplace.zip.sha256
 
@@ -186,9 +251,12 @@ jobs:
           path: |
             artifacts/marketplace/symphony-marketplace.zip
             artifacts/marketplace/symphony-marketplace.zip.sha256
+            artifacts/marketplace/symphony-container-image.txt
           if-no-files-found: error
 
   publish-release:
+    permissions:
+      contents: write
     needs: [package, package-azure-marketplace]
     runs-on: ubuntu-latest
 
