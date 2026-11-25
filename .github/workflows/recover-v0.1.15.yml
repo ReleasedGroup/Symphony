@@ -1,0 +1,129 @@
+name: Recover v0.1.15 release assets
+on: workflow_dispatch
+permissions:
+  contents: read
+env:
+  RELEASE_SHA: 5456adc1b173994a55d8882fe77f705b615da155
+  PUBLISHED_IMAGE: ghcr.io/releasedgroup/symphony-marketplace@sha256:642a56f01254bd88b908006d3b5c7d17c19fbbcd0c842391192ecc18d4478801
+jobs:
+  verify:
+    if: github.repository == 'ReleasedGroup/Symphony' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          persist-credentials: false
+      - name: Check tag and source run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/tags/v0.1.15 --jq .object.sha)" = "$RELEASE_SHA"
+          gh api repos/$GITHUB_REPOSITORY/actions/runs/45701712958 |
+            jq -e --arg sha "$RELEASE_SHA" '.head_sha == $sha and .event == "release" and .head_branch == "v0.1.15"'
+      - name: Verify immutable image anonymously and smoke-test Linux amd64
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref=${PUBLISHED_IMAGE:?Missing published image digest}
+          repository=${ref%@*}
+          [[ "$repository" == "ghcr.io/${GITHUB_REPOSITORY,,}-marketplace" ]]
+          [[ "${ref##*@}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          anonymous=$(mktemp -d)
+          trap 'rm -rf -- "$anonymous"' EXIT
+          # Send no GitHub credentials. Verify the registry serves the exact
+          # manifest to an anonymous pull token before creating a public ZIP.
+          if ! pull_token=$(curl -fsS --get 'https://ghcr.io/token' \
+            --data-urlencode 'service=ghcr.io' \
+            --data-urlencode "scope=repository:${repository#ghcr.io/}:pull" | jq -er '.token') ||
+            ! curl -fsS \
+              -H "Authorization: Bearer $pull_token" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/${repository#ghcr.io/}/manifests/${ref##*@}" > "$anonymous/manifest"; then
+            echo '::error::The Azure VM needs an anonymously pullable image. Check the GHCR package visibility and rerun. The Marketplace ZIP was not published.'
+            exit 1
+          fi
+          printf '%s  %s\n' "${ref##*:}" "$anonymous/manifest" | sha256sum -c -
+          docker --config "$anonymous" pull --platform linux/amd64 "$ref"
+          bash deploy/container/smoke-test.sh "$ref"
+      - name: Build Marketplace ZIP from the release source
+        run: |
+          python3 -m unittest discover -s deploy/azure-marketplace
+          python3 deploy/azure-marketplace/package.py --out generated --symphony-image "$PUBLISHED_IMAGE"
+          mkdir assets
+          cp generated/symphony-marketplace.zip assets/
+          cd assets
+          printf '%s\n' "$PUBLISHED_IMAGE" > symphony-container-image.txt
+          sha256sum symphony-marketplace.zip > symphony-marketplace.zip.sha256
+          python3 - <<'PYZIP'
+          import json, os, zipfile
+          with zipfile.ZipFile('symphony-marketplace.zip') as z:
+              assert sorted(z.namelist()) == ['createUiDefinition.json', 'mainTemplate.json']
+              assert json.loads(z.read('mainTemplate.json'))['parameters']['symphonyImage']['defaultValue'] == os.environ['PUBLISHED_IMAGE']
+              ui = json.loads(z.read('createUiDefinition.json'))
+              fields = [f for step in ui['parameters']['steps'] for f in step['elements'] if f['name'] == 'symphonyImage']
+              assert len(fields) == 1 and fields[0]['defaultValue'] == os.environ['PUBLISHED_IMAGE']
+          PYZIP
+      - name: Recover original checksum-pinned workflow artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          while read -r id digest rid; do
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > archived.zip
+            echo "$digest  archived.zip" | sha256sum -c -
+            extension=tar.gz
+            if [[ $rid == win-* ]]; then extension=zip; fi
+            name="Symphony-0.1.15-$rid.$extension"
+            for file in "$name" "$name.sha256"; do
+              unzip -p archived.zip "$file" > "assets/$file"
+            done
+            (cd assets && sha256sum --check "$name.sha256")
+          done <<'ARTIFACTS'
+          15063916650 5cf2b40b5dc27b5d1d8c47189bd62c73715f99caf9a2d9f6a064472b0b437baf linux-x64
+          15063467714 e5be0805a879a7d43ebfec174e7fd6c7e7eb8107273bf9c18ced3ca484619785 osx-x64
+          15063177847 911e1fa66b3841f14b6ae528aa68838c69da57f91e9b0f038d070c3d8f51d283 win-arm64
+          15062509255 df02ae9d33a2081de250f0ab437840a03fdabce77c88f07a92f1bc648a3058cb linux-arm64
+          15062494465 19718930d2a3ca0682359603c9c0ed01399c4689c659adc38441018124d6e137 osx-arm64
+          15062299975 c0283a2b3daceddff905d7de93ff97f7cb56042dbcbeccd63750804584588a8e win-x64
+          ARTIFACTS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-release-assets
+          path: assets/*
+          if-no-files-found: error
+  attach:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-release-assets
+          path: assets
+      - name: Attach verified assets to the existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/tags/v0.1.15 --jq .object.sha)" = "$RELEASE_SHA"
+          gh release view v0.1.15 --repo "$GITHUB_REPOSITORY" --json tagName,isDraft |
+            jq -e '.tagName == "v0.1.15" and (.isDraft | not)'
+          cd assets
+          sha256sum --check *.sha256
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 15
+          for file in *; do
+            existing=$(gh release view v0.1.15 --repo "$GITHUB_REPOSITORY" --json assets |
+              jq -r --arg name "$file" '.assets[] | select(.name == $name) | .digest')
+            if [[ -n "$existing" ]]; then
+              test "$existing" = "sha256:$(sha256sum "$file" | cut -d' ' -f1)"
+            else
+              gh release upload v0.1.15 "$file" --repo "$GITHUB_REPOSITORY"
+            fi
+          done
