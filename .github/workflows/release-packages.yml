@@ -236,13 +236,14 @@ jobs:
           if ! pull_token=$(curl -fsS --get 'https://ghcr.io/token' \
             --data-urlencode 'service=ghcr.io' \
             --data-urlencode "scope=repository:${repository#ghcr.io/}:pull" | jq -er '.token') ||
-            ! curl -fsS --head \
+            ! curl -fsS \
               -H "Authorization: Bearer $pull_token" \
-              -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
-              "https://ghcr.io/v2/${repository#ghcr.io/}/manifests/${ref##*@}" > /dev/null; then
+              -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/${repository#ghcr.io/}/manifests/${ref##*@}" > "$anonymous/manifest"; then
             echo '::error::The Azure VM needs an anonymously pullable image. Check the GHCR package visibility and rerun. The Marketplace ZIP was not published.'
             exit 1
           fi
+          printf '%s  %s\n' "${ref##*:}" "$anonymous/manifest" | sha256sum -c -
           docker --config "$anonymous" pull --platform linux/amd64 "$ref"
           bash deploy/container/smoke-test.sh "$ref"
           printf 'image=%s\n' "$ref" >> "$GITHUB_OUTPUT"
