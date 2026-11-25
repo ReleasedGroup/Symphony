@@ -106,8 +106,14 @@ class MarketplacePackageTest(unittest.TestCase):
             with zipfile.ZipFile(a/'symphony-marketplace.zip') as archive:
                 self.assertEqual(set(archive.namelist()), {'mainTemplate.json','createUiDefinition.json'})
 
+    def test_release_uses_dedicated_marketplace_package(self):
+        workflow = package.ROOT.parents[1] / '.github/workflows/release-packages.yml'
+        assignments = [line.strip() for line in workflow.read_text().splitlines()
+                       if line.strip().startswith('repository=')]
+        self.assertEqual(assignments, ['repository="ghcr.io/${GITHUB_REPOSITORY,,}-marketplace"'])
+
     def test_image_defaults_for_local_and_release_zips(self):
-        release_image = 'ghcr.io/releasedgroup/symphony@sha256:' + 'f' * 64
+        release_image = 'ghcr.io/releasedgroup/symphony-marketplace@sha256:' + 'f' * 64
         for configured in (None, release_image):
             with self.subTest(release_image=bool(configured)), tempfile.TemporaryDirectory() as d:
                 args = ['--symphony-image', configured] if configured else []
@@ -123,7 +129,7 @@ class MarketplacePackageTest(unittest.TestCase):
                     self.assertTrue(fields[name]['constraints']['required'])
                     if expected is not None:
                         self.assertRegex(expected, package.IMAGE)
-        for invalid in ('ghcr.io/releasedgroup/symphony:latest', 'ghcr.io/releasedgroup/symphony@sha256:123'):
+        for invalid in ('ghcr.io/releasedgroup/symphony-marketplace:latest', 'ghcr.io/releasedgroup/symphony-marketplace@sha256:123'):
             with self.assertRaises(ValueError):
                 package.files(invalid)
 
