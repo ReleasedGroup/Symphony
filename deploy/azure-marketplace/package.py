@@ -9,6 +9,17 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 NETWORK = '2024-05-01'
 COMPUTE = '2024-11-01'
+IDENTITY = '2023-01-31'
+VAULT = '2024-11-01'
+IDENTITY_TYPE = 'Microsoft.ManagedIdentity/userAssignedIdentities'
+VAULT_TYPE = 'Microsoft.KeyVault/vaults'
+VAULT_ACCESS_ROLE = '4633458b-17de-408a-b874-0445c86b69e6'
+SECRET_INPUTS = {
+    'githubSecret': ('githubToken', 'github-token', 'GitHub fine-grained token'),
+    'codexSecret': ('codexApiKey', 'codex-api-key', 'OpenAI project API key'),
+    'oidcSecret': ('entraClientSecret', 'entra-client-secret', 'Entra application client secret'),
+    'leaseSecret': ('leaseSigningKey', 'lease-signing-key', 'Managed lease signing key'),
+}
 SPECS = {
     'dnsLabel': ('DNS label', 'Choose a unique label for the public Azure DNS name; this is used in the Entra callback.', None, r'^[a-z][a-z0-9-]{1,61}[a-z0-9]$', 'hosting'),
     'sshPublicKey': ('Recovery SSH public key', 'Generate a key in Azure or supply an existing public key. This plan opens no SSH port.', None, None, 'hosting'),
@@ -77,6 +88,29 @@ def resources():
     net = rid(vnet_type, 'vnet')
     nic = rid(nic_type, 'nic')
     vm = rid(vm_type, 'vm')
+    new = f"equals({p('credentialMode')}, 'provision')"
+    identity = rid(IDENTITY_TYPE, 'managedIdentity')
+    vault = rid(VAULT_TYPE, 'vault')
+    resolved_identity = f"if({new}, {identity}, {p('identityResourceId')})"
+    yield res(IDENTITY_TYPE, IDENTITY, v('managedIdentity'), {}, condition=expr(new))
+    yield res(VAULT_TYPE, VAULT, v('vault'), dict(
+        tenantId=expr('subscription().tenantId'), sku=dict(family='A', name='standard'), accessPolicies=[],
+        enableRbacAuthorization=True, enableSoftDelete=True, enablePurgeProtection=True,
+        enabledForTemplateDeployment=False, enabledForDeployment=False, enabledForDiskEncryption=False),
+        condition=expr(new))
+    role = f"guid({vault}, {identity}, '{VAULT_ACCESS_ROLE}')"
+    yield dict(type='Microsoft.Authorization/roleAssignments', apiVersion='2022-04-01',
+        name=expr(role), condition=expr(new), scope=expr(f"concat('{VAULT_TYPE}/', {v('vault')})"),
+        dependsOn=[expr(vault), expr(identity)], properties=dict(
+            roleDefinitionId=expr(f"subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '{VAULT_ACCESS_ROLE}')"),
+            principalType='ServicePrincipal', principalId=expr(f"reference({identity}, '{IDENTITY}').principalId")))
+    vault_ready = [f"extensionResourceId({vault}, 'Microsoft.Authorization/roleAssignments', {role})"]
+    for value, name, _ in SECRET_INPUTS.values():
+        typ = f'{VAULT_TYPE}/secrets'
+        yield dict(type=typ, apiVersion=VAULT, condition=expr(new),
+            name=expr(f"concat({v('vault')}, '/{name}')"), dependsOn=[expr(vault)],
+            properties=dict(value=expr(p(value))))
+        vault_ready.append(f"resourceId('{typ}', {v('vault')}, '{name}')")
     # Azure generates the key after Review + create. If the portal supplies
     # only the new resource ID, read its public property (never generate in ARM).
     supplied = p('sshPublicKey')
@@ -109,12 +143,14 @@ def resources():
                         managedDisk=dict(storageAccountType='Premium_LRS'))),
         networkProfile=dict(networkInterfaces=[dict(id=expr(nic), properties=dict(primary=True))]),
         securityProfile=dict(securityType='TrustedLaunch', uefiSettings=dict(secureBootEnabled=True, vTpmEnabled=True))),
-        (nic,), identity={'type': 'UserAssigned', 'userAssignedIdentities': expr(f"createObject({p('identityResourceId')}, createObject())")})
+        (nic, identity), identity={'type': 'UserAssigned', 'userAssignedIdentities': expr(f"createObject({resolved_identity}, createObject())")})
     config = {
         'fqdn': v('fqdn'), 'tenantId': 'subscription().tenantId',
-        'identityClientId': f"reference({p('identityResourceId')}, '2023-01-31').clientId",
+        'identityClientId': f"reference({resolved_identity}, '{IDENTITY}').clientId",
         'labels': f"split({p('executionLabels')}, ',')",
-        **{x: p(x) for x in SPECS if x not in {'dnsLabel', 'sshPublicKey', 'identityResourceId', 'executionLabels'}},
+        **{x: p(x) for x in SPECS if x not in {'dnsLabel', 'sshPublicKey', 'identityResourceId', 'executionLabels', *SECRET_INPUTS}},
+        **{key: f"if({new}, concat('https://', {v('vault')}, '.vault.azure.net/secrets/{name}'), {p(key)})"
+           for key, (_, name, _) in SECRET_INPUTS.items()},
     }
     kv = ', '.join(f"'{key}', {value}" for key,value in config.items())
     prefix = base64.b64encode(b"#!/bin/bash\nexport SYMPHONY_CONFIG_B64='").decode()
@@ -123,7 +159,7 @@ def resources():
                   f"base64ToString('{suffix}'), base64ToString({v('bootstrap')}))")
     yield res(f'{vm_type}/runCommands', COMPUTE, f"concat({v('vm')}, '/configure')", dict(
         source=dict(script=inline), asyncExecution=False, timeoutInSeconds=1800,
-        treatFailureAsDeploymentFailure=True), (vm,))
+        treatFailureAsDeploymentFailure=True), (vm, *vault_ready))
 
 
 def main_template():
@@ -139,8 +175,14 @@ def main_template():
     params['sshPublicKey']['defaultValue'] = ''
     params['recoverySshKeyResourceId'] = dict(type='string', defaultValue='',
         metadata=dict(description='Azure SSH public key resource ID. Used only if no public key text is supplied.'))
+    params['credentialMode'] = dict(type='string', defaultValue='existing', allowedValues=['provision', 'existing'])
+    for key, (value, _, label) in SECRET_INPUTS.items():
+        params[key]['defaultValue'] = ''
+        params[value] = dict(type='secureString', defaultValue='', metadata=dict(description=label))
+    params['identityResourceId']['defaultValue'] = ''
     n = lambda suffix: expr(f"concat('sym-', uniqueString(resourceGroup().id), '-{suffix}')")
     variables = {name: n(name) for name in ['nsg','ip','vnet','nic','vm']}
+    variables.update(managedIdentity=n('identity'), vault=expr("concat('sym', uniqueString(resourceGroup().id))"))
     # Use the deterministic name to register the callback before install.
     variables['fqdn'] = expr(f"concat({p('dnsLabel')}, '.', {p('location')}, '.cloudapp.azure.com')")
     variables['bootstrap'] = base64.b64encode((ROOT/'bootstrap.sh').read_bytes()).decode()
@@ -158,13 +200,26 @@ def main_template():
 def ui():
     steps = {
         'hosting': ('Hosting', 'One Ubuntu VM with a durable managed OS disk and HTTPS ingress.'),
-        'identity': ('Entra and Key Vault', 'Use a single-tenant Entra application and pre-provisioned Key Vault secret references.'),
+        'identity': ('Entra and Key Vault', 'Choose a new dedicated managed identity and vault, or reuse existing references.'),
         'workflow': ('GitHub and runtime', 'Choose a repository, branch, labels and execution limits. Jobs require a current signed lease.'),
         'images': ('Pinned images', 'Specify trusted, digest-pinned containers. No mutable latest tags.'),
     }
     built = {step: dict(name=step,label=label,subLabel=dict(preValidation=label,postValidation=label),
                        bladeTitle=label, elements=[]) for step,(label, _) in steps.items()}
     outputs = {'location': '[location()]'}
+    id_step = built['identity']['elements']
+    id_step.append(dict(name='entraSetupHelp', type='Microsoft.Common.InfoBox', options=dict(icon='Info',
+        text='Use an existing single-tenant app and operator group, or first run the tenant-admin Entra setup helper. The wizard does not grant directory permissions.',
+        uri='https://github.com/ReleasedGroup/Symphony/tree/main/deploy/azure-marketplace#entra-application-and-operator-group')))
+    mode = "steps('identity').credentialMode"
+    new = f"equals({mode}, 'provision')"
+    existing = f"equals({mode}, 'existing')"
+    id_step.append(dict(name='credentialMode', type='Microsoft.Common.DropDown',
+        label='Managed identity and Key Vault', defaultValue='Create dedicated identity and vault',
+        constraints=dict(required=True, allowedValues=[
+            dict(label='Create dedicated identity and vault', value='provision'),
+            dict(label='Use existing identity and vault references', value='existing')])))
+    outputs['credentialMode'] = expr(mode)
     for key, (label, tip, value, pattern, step) in SPECS.items():
         if key == 'sshPublicKey':
             name = 'recoverySsh'
@@ -188,6 +243,19 @@ def ui():
         built[step]['elements'].append(text)
         call = f"steps('{step}').{key}"
         outputs[key] = expr(f'int({call})' if key in INTEGERS else call)
+        if key == 'identityResourceId' or key in SECRET_INPUTS:
+            text['visible'] = expr(existing)
+            text['constraints']['required'] = expr(existing)
+            outputs[key] = expr(f"if({existing}, {call}, '')")
+    for key, (value, _, label) in SECRET_INPUTS.items():
+        length = 32 if key == 'leaseSecret' else 1
+        id_step.append(dict(name=value, type='Microsoft.Common.PasswordBox',
+            label=dict(password=label, confirmPassword=f'Confirm {label}'),
+            toolTip='Enter a credential issued for this deployment. Azure stores it in the dedicated vault.',
+            constraints=dict(required=expr(new), regex=r'^[A-Za-z0-9._~+/=:-]{' + str(length) + r',}$',
+                             validationMessage=f'Enter a valid {label.lower()}.'),
+            options=dict(hideConfirmation=True), visible=expr(new)))
+        outputs[value] = expr(f"if({new}, steps('identity').{value}, '')")
     return {'$schema':'https://schema.management.azure.com/schemas/0.1.2-preview/CreateUIDefinition.MultiVm.json#',
             'handler':'Microsoft.Azure.CreateUIDef','version':'0.1.2-preview',
             'parameters':dict(config=dict(isWizard=True,basics=dict(description='Deploy a single-tenant Symphony instance for one GitHub repository.')),
