@@ -1,0 +1,32 @@
+name: Inspect private v0.1.15 Marketplace image
+on:
+  push:
+    branches: [release/inspect-v0.1.15-image]
+permissions:
+  packages: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/releasedgroup/symphony-marketplace@sha256:642a56f01254bd88b908006d3b5c7d17c19fbbcd0c842391192ecc18d4478801
+    steps:
+      - name: Fetch checksum-pinned secret scanner
+        run: |
+          curl -fsSLo scanner.tar.gz https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz
+          echo 'bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf  scanner.tar.gz' | sha256sum -c -
+          tar -xzf scanner.tar.gz trivy
+      - name: Read the exact private image and verify provenance labels
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          auth=$(mktemp -d)
+          trap 'rm -rf -- "$auth"' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker --config "$auth" login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          unset GHCR_TOKEN
+          docker --config "$auth" pull --platform linux/amd64 "$IMAGE"
+          test "$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" = '5456adc1b173994a55d8882fe77f705b615da155'
+          test "$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.source"}}' "$IMAGE")" = 'https://github.com/ReleasedGroup/Symphony'
+          docker save --platform linux/amd64 "$IMAGE" -o image.tar
+      - name: Scan private image for embedded secrets
+        run: |
+          ./trivy image --input image.tar --scanners secret --format json --output findings.json --exit-code 1
