@@ -110,8 +110,7 @@ done
 # the same read-only config, with no credentials persisted in CODEX_HOME.
 codex_home=/home/symphony/.codex
 cat > "$tmp/codex-config.toml" <<'CODEX_CONFIG'
-model_provider = "openai"
-forced_login_method = "api"
+model_provider = "marketplace_openai"
 approval_policy = "never"
 sandbox_mode = "workspace-write"
 check_for_update_on_startup = false
@@ -121,6 +120,16 @@ network_access = false
 
 [shell_environment_policy]
 exclude = ["OPENAI_API_KEY", "GITHUB_TOKEN", "MARKETPLACE_LEASE_KEY"]
+
+# Do not rely on a pre-existing Codex login on the image or attached disk.
+# The app-server reads this provider's key directly from its environment.
+[model_providers.marketplace_openai]
+name = "OpenAI API"
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
 CODEX_CONFIG
 install -m 0644 "$tmp/codex-config.toml" "$state/codex-config.toml"
 codex_mount="type=bind,source=$state/codex-config.toml,target=$codex_home/config.toml,readonly"

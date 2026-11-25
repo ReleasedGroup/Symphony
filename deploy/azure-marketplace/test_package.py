@@ -140,10 +140,20 @@ class MarketplacePackageTest(unittest.TestCase):
         self.assertFalse(vault['properties']['enabledForTemplateDeployment'])
         self.assertEqual(role['scope'], "[concat('Microsoft.KeyVault/vaults/', variables('vault'))]")
         self.assertIn(package.VAULT_ACCESS_ROLE, role['properties']['roleDefinitionId'])
-        self.assertIn('.principalId',role['properties']['principalId'])
+        self.assertEqual(role['properties']['principalId'],
+            "[if(equals(parameters('credentialMode'), 'provision'), "
+            "reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', "
+            "variables('managedIdentity')), '2023-01-31').principalId, null())]")
         for r in [vault, identity, role]:
             self.assertEqual(r['condition'], "[equals(parameters('credentialMode'), 'provision')]")
         self.assertIn('extensionResourceId',json.dumps(resources[-1]['dependsOn']))
+        expected_identity = ("if(equals(parameters('credentialMode'), 'provision'), "
+                             "resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', "
+                             "variables('managedIdentity')), parameters('identityResourceId'))")
+        vm = next(r for r in resources if r['type'] == 'Microsoft.Compute/virtualMachines')
+        self.assertIn(expected_identity, vm['identity']['userAssignedIdentities'])
+        self.assertIn(f"reference({expected_identity}, '2023-01-31').clientId",
+                      resources[-1]['properties']['source']['script'])
 
     def test_validated_normal_config_and_limits(self):
         cases = [{},dict(pollSeconds=30,turnSeconds=60,stallSeconds=30,maxAgents=5),
@@ -171,8 +181,13 @@ class MarketplacePackageTest(unittest.TestCase):
         s = self.bootstrap.read_text()
         config = s.split("<<'CODEX_CONFIG'\n", 1)[1].split('\nCODEX_CONFIG\n', 1)[0]
         options = tomllib.loads(config)
-        self.assertEqual(options['model_provider'], 'openai')
-        self.assertEqual(options['forced_login_method'], 'api')
+        self.assertEqual(options['model_provider'], 'marketplace_openai')
+        self.assertNotIn('forced_login_method', options)
+        self.assertEqual(options['model_providers'][options['model_provider']], {
+            'name': 'OpenAI API', 'base_url': 'https://api.openai.com/v1',
+            'env_key': 'OPENAI_API_KEY', 'wire_api': 'responses',
+            'requires_openai_auth': False, 'supports_websockets': False,
+        })
         self.assertEqual(options['sandbox_mode'], 'workspace-write')
         self.assertEqual(options['approval_policy'], 'never')
         self.assertFalse(options['sandbox_workspace_write']['network_access'])

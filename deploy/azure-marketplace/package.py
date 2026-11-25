@@ -103,7 +103,8 @@ def resources():
         name=expr(role), condition=expr(new), scope=expr(f"concat('{VAULT_TYPE}/', {v('vault')})"),
         dependsOn=[expr(vault), expr(identity)], properties=dict(
             roleDefinitionId=expr(f"subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '{VAULT_ACCESS_ROLE}')"),
-            principalType='ServicePrincipal', principalId=expr(f"reference({identity}, '{IDENTITY}').principalId")))
+            principalType='ServicePrincipal',
+            principalId=expr(f"if({new}, reference({identity}, '{IDENTITY}').principalId, null())")))
     vault_ready = [f"extensionResourceId({vault}, 'Microsoft.Authorization/roleAssignments', {role})"]
     for value, name, _ in SECRET_INPUTS.values():
         typ = f'{VAULT_TYPE}/secrets'
