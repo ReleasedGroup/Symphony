@@ -109,8 +109,18 @@ class MarketplacePackageTest(unittest.TestCase):
     def test_release_uses_dedicated_marketplace_package(self):
         workflow = package.ROOT.parents[1] / '.github/workflows/release-packages.yml'
         assignments = [line.strip() for line in workflow.read_text().splitlines()
-                       if line.strip().startswith('repository=')]
+                       if line.strip().startswith('repository="ghcr.io/')]
         self.assertEqual(assignments, ['repository="ghcr.io/${GITHUB_REPOSITORY,,}-marketplace"'])
+
+    def test_failed_anonymous_check_retries_without_publishing(self):
+        workflow = (package.ROOT.parents[1] / '.github/workflows/release-packages.yml').read_text()
+        verify = workflow.split('\n  verify-container:\n', 1)[1].split('\n  package-azure-marketplace:', 1)[0]
+        self.assertIn('needs: publish-container', verify)
+        self.assertIn('needs.publish-container.outputs.image', verify)
+        self.assertIn('pull --platform linux/amd64 "$ref"', verify)
+        self.assertNotIn(' push ', verify)
+        self.assertNotIn('docker build', verify)
+        self.assertIn('SYMPHONY_IMAGE: ${{ needs.verify-container.outputs.image }}', workflow)
 
     def test_image_defaults_for_local_and_release_zips(self):
         release_image = 'ghcr.io/releasedgroup/symphony-marketplace@sha256:' + 'f' * 64

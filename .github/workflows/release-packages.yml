@@ -197,14 +197,40 @@ jobs:
           bash deploy/container/smoke-test.sh "$tagged"
 
           signed_in=$(mktemp -d)
-          anonymous=$(mktemp -d)
-          trap 'rm -rf -- "$signed_in" "$anonymous"' EXIT
+          trap 'rm -rf -- "$signed_in"' EXIT
           printf '%s' "$GHCR_TOKEN" | docker --config "$signed_in" login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           unset GHCR_TOKEN
           docker --config "$signed_in" push "$tagged"
           ref=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tagged" |
             awk -v repo="$repository" 'index($0, repo "@sha256:") == 1 {print}')
           [[ "${ref#"$repository"@}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'image=%s\n' "$ref" >> "$GITHUB_OUTPUT"
+          printf 'Published image: `%s`\n' "$ref" >> "$GITHUB_STEP_SUMMARY"
+
+  verify-container:
+    needs: publish-container
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.verify.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify the published digest anonymously
+        id: verify
+        shell: bash
+        env:
+          PUBLISHED_IMAGE: ${{ needs.publish-container.outputs.image }}
+        run: |
+          set -euo pipefail
+          ref=${PUBLISHED_IMAGE:?Missing published image digest}
+          repository=${ref%@*}
+          [[ "$repository" == "ghcr.io/${GITHUB_REPOSITORY,,}-marketplace" ]]
+          [[ "${ref##*@}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          anonymous=$(mktemp -d)
+          trap 'rm -rf -- "$anonymous"' EXIT
           # Send no GitHub credentials. Verify the registry serves the exact
           # manifest to an anonymous pull token before creating a public ZIP.
           if ! pull_token=$(curl -fsS --get 'https://ghcr.io/token' \
@@ -222,7 +248,7 @@ jobs:
           printf 'image=%s\n' "$ref" >> "$GITHUB_OUTPUT"
 
   package-azure-marketplace:
-    needs: [validate, publish-container]
+    needs: [validate, verify-container]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -237,7 +263,7 @@ jobs:
 
       - name: Build Azure Marketplace package
         env:
-          SYMPHONY_IMAGE: ${{ needs.publish-container.outputs.image }}
+          SYMPHONY_IMAGE: ${{ needs.verify-container.outputs.image }}
         run: |
           python3 deploy/azure-marketplace/package.py --out artifacts/marketplace --symphony-image "${SYMPHONY_IMAGE:?Missing published image digest}"
           printf '%s\n' "$SYMPHONY_IMAGE" > artifacts/marketplace/symphony-container-image.txt
