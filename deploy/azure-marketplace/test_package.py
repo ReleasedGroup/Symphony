@@ -66,6 +66,33 @@ class MarketplacePackageTest(unittest.TestCase):
         self.assertFalse(run['asyncExecution'])
         self.assertEqual(self.bootstrap.read_bytes(),base64.b64decode(self.template['variables']['bootstrap']))
 
+    def test_wizard_deploys_with_azure_recovery_public_key(self):
+        wizard = self.ui['parameters']
+        hosting = next(step for step in wizard['steps'] if step['name'] == 'hosting')
+        control = next(c for c in hosting['elements'] if c['name'] == 'recoverySsh')
+        self.assertEqual(control['type'], 'Microsoft.Compute.CredentialsCombo')
+        self.assertEqual(control['osPlatform'], 'Linux')
+        self.assertTrue(control['options']['hidePassword'])
+        self.assertTrue(control['constraints']['required'])
+        public = wizard['outputs']['sshPublicKey']
+        resource = wizard['outputs']['recoverySshKeyResourceId']
+        self.assertEqual(public, "[coalesce(steps('hosting').recoverySsh.sshPublicKey, '')]")
+        self.assertIn('recoverySsh.generateNewSshKey', resource)
+        self.assertIn('/providers/Microsoft.Compute/sshPublicKeys/', resource)
+        self.assertIn('resourceGroup().name', resource)
+        self.assertIn('recoverySsh.sshKeyName', resource)
+        self.assertNotIn('privateKey', json.dumps(wizard['outputs']))
+        vm = next(r for r in self.template['resources'] if r['type'] == 'Microsoft.Compute/virtualMachines')
+        keys = vm['properties']['osProfile']['linuxConfiguration']['ssh']['publicKeys']
+        self.assertEqual(keys[0]['path'], '/home/symphonyops/.ssh/authorized_keys')
+        expression = keys[0]['keyData']
+        self.assertIn("empty(trim(parameters('sshPublicKey')))", expression)
+        self.assertIn("reference(parameters('recoverySshKeyResourceId'), '2024-03-01').publicKey", expression)
+        self.assertIn("concat('ssh-rsa '", expression)
+        self.assertIn("concat('ssh-ed25519 '", expression)
+        self.assertEqual(self.template['parameters']['recoverySshKeyResourceId']['defaultValue'], '')
+        self.assertNotIn('generateKeyPair', json.dumps(self.template))
+
     def test_no_secrets_in_ui_and_zip_is_reproducible(self):
         for key in ['githubSecret','codexSecret','oidcSecret','leaseSecret']:
             field = self.template['parameters'][key]

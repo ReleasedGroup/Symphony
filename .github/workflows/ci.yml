@@ -37,3 +37,15 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: deploy/azure-marketplace
         run: python3 -m unittest -v
+
+      - name: Build Azure Marketplace package
+        if: runner.os == 'Linux'
+        run: python3 deploy/azure-marketplace/package.py --out artifacts/marketplace
+
+      - name: Upload Azure Marketplace ZIP
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: symphony-azure-marketplace
+          path: artifacts/marketplace/symphony-marketplace.zip
+          if-no-files-found: error

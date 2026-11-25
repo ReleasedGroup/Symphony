@@ -11,7 +11,7 @@ NETWORK = '2024-05-01'
 COMPUTE = '2024-11-01'
 SPECS = {
     'dnsLabel': ('DNS label', 'Choose a unique label for the public Azure DNS name; this is used in the Entra callback.', None, r'^[a-z][a-z0-9-]{1,61}[a-z0-9]$', 'hosting'),
-    'sshPublicKey': ('Recovery SSH public key', 'Public key only. This plan opens no SSH port. Keep the private key separately for authorised recovery.', None, r'^ssh-rsa [A-Za-z0-9+/=]{100,}( .*)?$', 'hosting'),
+    'sshPublicKey': ('Recovery SSH public key', 'Generate a key in Azure or supply an existing public key. This plan opens no SSH port.', None, None, 'hosting'),
     'identityResourceId': ('User-assigned identity resource ID', 'Existing identity with access to the four Key Vault secrets. Do not grant subscription-wide roles.', None, r'^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[^/]+/providers/Microsoft.ManagedIdentity/userAssignedIdentities/[^/]+$', 'identity'),
     'entraClientId': ('Entra application client ID', 'Single-tenant app with assignment required and the Web callback registered. See setup guide.', None, r'^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$', 'identity'),
     'entraOperatorGroupId': ('Entra operator group object ID', 'Only principals with this immutable group ID in their signed Entra token can use the portal or API.', None, r'^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$', 'identity'),
@@ -77,6 +77,15 @@ def resources():
     net = rid(vnet_type, 'vnet')
     nic = rid(nic_type, 'nic')
     vm = rid(vm_type, 'vm')
+    # Azure generates the key after Review + create. If the portal supplies
+    # only the new resource ID, read its public property (never generate in ARM).
+    supplied = p('sshPublicKey')
+    from_resource = f"reference({p('recoverySshKeyResourceId')}, '2024-03-01').publicKey"
+    key = f"if(and(empty(trim({supplied})), not(empty({p('recoverySshKeyResourceId')}))), {from_resource}, trim({supplied}))"
+    # The credentials control documents a bare base64 RSA value as well as
+    # accepting complete OpenSSH public keys. Prefix only recognised blobs.
+    key_data = expr(f"if(startsWith({key}, 'AAAAB3NzaC1yc2E'), concat('ssh-rsa ', {key}), "
+                    f"if(startsWith({key}, 'AAAAC3NzaC1lZDI1NTE5'), concat('ssh-ed25519 ', {key}), {key}))")
     yield res(nsg_type, NETWORK, v('nsg'), dict(securityRules=[
         rule('http-for-acme-and-redirect', '80', 100),
         rule('https-entra-gateway', '443', 110),
@@ -93,7 +102,7 @@ def resources():
         hardwareProfile=dict(vmSize='Standard_D4s_v5'),
         osProfile=dict(computerName=expr(v('vm')), adminUsername='symphonyops',
             linuxConfiguration=dict(disablePasswordAuthentication=True,
-                ssh=dict(publicKeys=[dict(path='/home/symphonyops/.ssh/authorized_keys', keyData=expr(p('sshPublicKey')))]))),
+                ssh=dict(publicKeys=[dict(path='/home/symphonyops/.ssh/authorized_keys', keyData=key_data)]))),
         storageProfile=dict(
             imageReference=dict(publisher='Canonical', offer='ubuntu-24_04-lts', sku='server', version='latest'),
             osDisk=dict(createOption='FromImage', diskSizeGB=128, deleteOption='Detach',
@@ -127,6 +136,9 @@ def main_template():
         if value is not None:
             param['defaultValue'] = int(value) if key in INTEGERS else value
         params[key] = param
+    params['sshPublicKey']['defaultValue'] = ''
+    params['recoverySshKeyResourceId'] = dict(type='string', defaultValue='',
+        metadata=dict(description='Azure SSH public key resource ID. Used only if no public key text is supplied.'))
     n = lambda suffix: expr(f"concat('sym-', uniqueString(resourceGroup().id), '-{suffix}')")
     variables = {name: n(name) for name in ['nsg','ip','vnet','nic','vm']}
     # Use the deterministic name to register the callback before install.
@@ -154,6 +166,20 @@ def ui():
                        bladeTitle=label, elements=[]) for step,(label, _) in steps.items()}
     outputs = {'location': '[location()]'}
     for key, (label, tip, value, pattern, step) in SPECS.items():
+        if key == 'sshPublicKey':
+            name = 'recoverySsh'
+            built[step]['elements'].append(dict(name=name, type='Microsoft.Compute.CredentialsCombo',
+                label=dict(authenticationType='Recovery authentication', sshPublicKey=label),
+                toolTip=dict(authenticationType='SSH public key only.', sshPublicKey=tip),
+                constraints=dict(required=True), options=dict(hidePassword=True), osPlatform='Linux'))
+            call = f"steps('{step}').{name}"
+            outputs[key] = expr(f"coalesce({call}.sshPublicKey, '')")
+            # An existing key selected in another resource group is passed as
+            # public key text. A new key is created in this wizard's group.
+            outputs['recoverySshKeyResourceId'] = expr(
+                f"if({call}.generateNewSshKey, concat(subscription().id, '/resourceGroups/', "
+                f"resourceGroup().name, '/providers/Microsoft.Compute/sshPublicKeys/', {call}.sshKeyName), '')")
+            continue
         pattern = pattern or (IMAGE if key.endswith('Image') else SECRET)
         text = dict(name=key,type='Microsoft.Common.TextBox',label=label,toolTip=tip,
                     constraints=dict(required=True,regex=pattern,validationMessage=f'Enter a valid {label.lower()}.'))
