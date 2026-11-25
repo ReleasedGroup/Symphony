@@ -188,7 +188,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ && ${#RELEASE_TAG} -le 128 ]]
-          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}-marketplace"
           tagged="$repository:$RELEASE_TAG"
           docker build --platform linux/amd64 --tag "$tagged" \
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
