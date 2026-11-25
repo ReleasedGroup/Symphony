@@ -33,6 +33,12 @@ jobs:
       - name: Test
         run: dotnet test Symphony.slnx --configuration Release --no-build
 
+      - name: Build and smoke-test the Symphony Linux container
+        if: runner.os == 'Linux'
+        run: |
+          docker build --platform linux/amd64 --tag symphony:ci .
+          bash deploy/container/smoke-test.sh symphony:ci
+
       - name: Test Azure Marketplace package
         if: runner.os == 'Linux'
         working-directory: deploy/azure-marketplace

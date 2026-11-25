@@ -47,7 +47,7 @@ class MarketplacePackageTest(unittest.TestCase):
         for key in package.INTEGERS:
             self.assertIn('int(',self.ui['parameters']['outputs'][key])
         self.assertEqual(set(self.template['outputs']), {'portalUrl', 'apiBaseUrl',
-                         'healthUrl', 'entraRedirectUri', 'vmName'})
+                         'healthUrl', 'entraRedirectUri', 'vmName', 'generatedLeaseSecretUri'})
         self.assertIn('/api/v1',self.template['outputs']['apiBaseUrl']['value'])
         self.assertIn('/oauth2/callback',self.template['outputs']['entraRedirectUri']['value'])
 
@@ -106,6 +106,27 @@ class MarketplacePackageTest(unittest.TestCase):
             with zipfile.ZipFile(a/'symphony-marketplace.zip') as archive:
                 self.assertEqual(set(archive.namelist()), {'mainTemplate.json','createUiDefinition.json'})
 
+    def test_image_defaults_for_local_and_release_zips(self):
+        release_image = 'ghcr.io/releasedgroup/symphony@sha256:' + 'f' * 64
+        for configured in (None, release_image):
+            with self.subTest(release_image=bool(configured)), tempfile.TemporaryDirectory() as d:
+                args = ['--symphony-image', configured] if configured else []
+                subprocess.run([sys.executable, package.ROOT / 'package.py', '--out', d, *args], check=True)
+                with zipfile.ZipFile(Path(d) / 'symphony-marketplace.zip') as archive:
+                    template = json.loads(archive.read('mainTemplate.json'))
+                    ui = json.loads(archive.read('createUiDefinition.json'))
+                fields = {c['name']: c for step in ui['parameters']['steps'] for c in step['elements']}
+                for name, expected in {'symphonyImage': configured, 'caddyImage': package.CADDY_IMAGE,
+                                       'oauthImage': package.OAUTH_IMAGE}.items():
+                    self.assertEqual(fields[name].get('defaultValue'), expected)
+                    self.assertEqual(template['parameters'][name].get('defaultValue'), expected)
+                    self.assertTrue(fields[name]['constraints']['required'])
+                    if expected is not None:
+                        self.assertRegex(expected, package.IMAGE)
+        for invalid in ('ghcr.io/releasedgroup/symphony:latest', 'ghcr.io/releasedgroup/symphony@sha256:123'):
+            with self.assertRaises(ValueError):
+                package.files(invalid)
+
     def test_provisioning_secrets_flow_only_from_secure_inputs_to_vault(self):
         resources = self.template['resources']
         step = next(s for s in self.ui['parameters']['steps'] if s['name'] == 'identity')
@@ -115,10 +136,15 @@ class MarketplacePackageTest(unittest.TestCase):
         script = run['properties']['source']['script']
         for key, (value, secret, _) in package.SECRET_INPUTS.items():
             self.assertEqual(self.template['parameters'][value]['type'],'secureString')
-            self.assertEqual(fields[value]['type'],'Microsoft.Common.PasswordBox')
-            self.assertIn("'provision'",fields[value]['visible'])
+            if key == 'leaseSecret':
+                self.assertNotIn(value, fields)
+                self.assertEqual(outputs[value], '')
+            else:
+                self.assertEqual(fields[value]['type'],'Microsoft.Common.PasswordBox')
+                self.assertIn("'provision'",fields[value]['visible'])
             self.assertIn("'existing'",fields[key]['visible'])
-            self.assertIn("'provision'",outputs[value])
+            if key != 'leaseSecret':
+                self.assertIn("'provision'",outputs[value])
             target = next(r for r in resources if r['type'].endswith('/vaults/secrets')
                           and secret in r['name'])
             self.assertEqual(target['properties']['value'], f"[parameters('{value}')]")
@@ -128,6 +154,75 @@ class MarketplacePackageTest(unittest.TestCase):
             self.assertIn(f'.vault.azure.net/secrets/{secret}',script)
             self.assertIn(f"parameters('{key}')",script)
             self.assertTrue(any(secret in dep for dep in run['dependsOn']))
+
+    def test_generated_lease_scopes_and_exact_wizard_routes(self):
+        wizard = self.ui['parameters']
+        fields = {e['name']: e for step in wizard['steps'] for e in step['elements']}
+        self.assertEqual(fields['leaseKeyMode']['defaultValue'], 'Generate a new key')
+        self.assertEqual(wizard['outputs']['leaseKeyMode'],
+                         "[if(equals(steps('identity').credentialMode, 'existing'), 'existing', steps('identity').leaseKeyMode)]")
+        self.assertEqual(fields['leaseSecret']['visible'], fields['leaseSecret']['constraints']['required'])
+        self.assertIn("steps('identity').leaseKeyMode, 'existing'", fields['leaseSecret']['visible'])
+        resources = self.template['resources']
+        generator = next(r for r in resources if r['type'] == package.SCRIPT_TYPE)
+        condition = "[and(equals(parameters('credentialMode'), 'provision'), equals(parameters('leaseKeyMode'), 'generate'))]"
+        self.assertEqual(generator['condition'], condition)
+        self.assertEqual(generator['properties']['cleanupPreference'], 'Always')
+        self.assertNotIn('outputs', generator['properties'])
+        self.assertIn('leaseWriter', json.dumps(generator['identity']))
+        self.assertNotIn('leaseWriter', json.dumps(next(r for r in resources if r['type'] == 'Microsoft.Compute/virtualMachines')))
+        roles = [r for r in resources if r['type'] == 'Microsoft.Authorization/roleAssignments' and r['condition'] == condition]
+        self.assertEqual(len(roles), 2)
+        for r in roles:
+            self.assertIn("variables('leaseVault')", r['scope'])
+            self.assertIn('null()', r['properties']['principalId'])
+        self.assertIn(package.LEASE_WRITER_ROLE, roles[0]['properties']['roleDefinitionId'])
+        self.assertIn(package.VAULT_ACCESS_ROLE, roles[1]['properties']['roleDefinitionId'])
+        self.assertIn(package.SCRIPT_TYPE, json.dumps(resources[-1]['dependsOn']))
+        self.assertEqual(self.template['outputs']['generatedLeaseSecretUri']['condition'], condition)
+        self.assertIn("variables('leaseVault')", self.template['outputs']['generatedLeaseSecretUri']['value'])
+        self.assertEqual(self.template['parameters']['leaseKeyMode']['defaultValue'], 'supplied')
+
+    def test_lease_generator_executes_and_preserves_an_existing_secret(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d)
+            secret = path / 'simulated-vault'
+            (path / 'az').write_text("""#!/bin/bash
+if [[ "$3" == list ]]; then
+    [[ "${FAIL_LIST:-}" != 1 ]] || exit 1
+    if [[ -f "$SIMULATED_VAULT" ]]; then
+        echo 'https://symleaseexample.vault.azure.net/secrets/lease-signing-key'
+    fi
+    exit 0
+fi
+[[ "$3" == set ]] || exit 8
+while [[ "$1" != --file && $# -gt 1 ]]; do shift; done
+[[ "$1" == --file && "$3" == --output && "$4" == none ]] || exit 9
+cp -- "$2" "$SIMULATED_VAULT"
+""")
+            (path / 'sleep').write_text('#!/bin/bash\nexit 0\n')
+            for tool in ('az', 'sleep'):
+                (path / tool).chmod(0o700)
+            env = {**os.environ, 'PATH': f"{path}{os.pathsep}{os.environ['PATH']}",
+                   'SYMPHONY_LEASE_VAULT': 'symleaseexample', 'SIMULATED_VAULT': str(secret)}
+            script = next(r['properties']['scriptContent'] for r in self.template['resources']
+                          if r['type'] == package.SCRIPT_TYPE)
+            def run(environment=env):
+                return subprocess.run(['bash', '-s'], input=script, text=True,
+                                      capture_output=True, env=environment, check=False)
+
+            first = run()
+            self.assertEqual((first.returncode, first.stdout, first.stderr), (0, '', ''))
+            key = secret.read_text()
+            self.assertRegex(key, r'^[a-f0-9]{64}$')
+            second = run()
+            self.assertEqual((second.returncode, second.stdout, second.stderr), (0, '', ''))
+            self.assertEqual(secret.read_text(), key)
+            secret.unlink()
+            failure = run({**env, 'FAIL_LIST': '1'})
+            self.assertEqual(failure.returncode, 3)
+            self.assertFalse(secret.exists())
+            self.assertNotIn(key, failure.stdout + failure.stderr)
 
     def test_new_identity_and_vault_are_opt_in_and_the_grant_is_vault_scoped(self):
         resources = self.template['resources']
