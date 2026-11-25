@@ -83,11 +83,9 @@ header = "Authorization: Bearer $token"
 EOF
 }
 gh=$(secret .githubSecret)
-codex=$(secret .codexSecret)
 oidc=$(secret .oidcSecret)
 lease=$(secret .leaseSecret)
 (( ${#lease} >= 32 )) || { echo 'Lease signing secret must be at least 32 characters.' >&2; exit 5; }
-unset token
 generation=$(cat generation)
 symphony=$(p .symphonyImage)
 oauth=$(p .oauthImage)
@@ -95,6 +93,32 @@ caddy=$(p .caddyImage)
 for image in "$symphony" "$oauth" "$caddy"; do
   docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image" >/dev/null
 done
+# The image provisions the pinned CLI. Give both the preflight and the engine
+# the same read-only config, with no credentials persisted in CODEX_HOME.
+codex_home=/home/symphony/.codex
+cat > "$tmp/codex-config.toml" <<'CODEX_CONFIG'
+model_provider = "openai"
+forced_login_method = "api"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+check_for_update_on_startup = false
+
+[sandbox_workspace_write]
+network_access = false
+
+[shell_environment_policy]
+exclude = ["OPENAI_API_KEY", "GITHUB_TOKEN", "MARKETPLACE_LEASE_KEY"]
+CODEX_CONFIG
+install -m 0644 "$tmp/codex-config.toml" "$state/codex-config.toml"
+codex_mount="type=bind,source=$state/codex-config.toml,target=$codex_home/config.toml,readonly"
+# Run as the image's normal user, offline and without the Key Vault key.
+# Check the binary, app-server command and ability to load the shipped configuration.
+if ! docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+  --entrypoint /bin/sh -e "CODEX_HOME=$codex_home" --mount "$codex_mount" "$symphony" \
+  -ec 'test -r "$CODEX_HOME/config.toml" && codex --version && codex app-server --help && codex features list' >/dev/null 2>&1; then
+  echo 'Codex CLI preflight failed: verify the approved Symphony image and its config.toml support.' >&2
+  exit 9
+fi
 oauth_version=$(docker run --rm --network none "$oauth" --version)
 if [[ $oauth_version =~ (^|[[:space:]])v?7\.([0-9]+)\.([0-9]+)($|[[:space:]]) ]]; then
   o_minor=${BASH_REMATCH[2]}; o_patch=${BASH_REMATCH[3]}
@@ -158,9 +182,12 @@ case "$1" in
 esac
 EOF
 chmod 0755 "$state/git-askpass"
+codex=$(secret .codexSecret)
+unset token
 cat > "$tmp/engine.env" <<EOF
 GITHUB_TOKEN=$gh
 OPENAI_API_KEY=$codex
+CODEX_HOME=$codex_home
 MARKETPLACE_LEASE_KEY=$lease
 ManagedLease__Enabled=true
 ManagedLease__InstanceId=$fqdn
@@ -189,7 +216,7 @@ for name in symphony-mp-edge symphony-mp-auth symphony-mp-engine; do
 done
 docker run -d --name symphony-mp-engine --network symphony-engine --cap-drop ALL \
   --security-opt no-new-privileges --pids-limit 512 --env-file "$tmp/engine.env" \
-  -v symphony-marketplace-data:/var/lib/symphony \
+  --mount "$codex_mount" -v symphony-marketplace-data:/var/lib/symphony \
   -v "$state/WORKFLOW.md":/config/WORKFLOW.md:ro -v "$state/git-askpass":/opt/git-askpass:ro "$symphony" >/dev/null
 docker create --name symphony-mp-auth --network symphony-edge --ip 172.29.111.3 \
   --read-only --cap-drop ALL --security-opt no-new-privileges --env-file "$tmp/oauth.env" "$oauth" \

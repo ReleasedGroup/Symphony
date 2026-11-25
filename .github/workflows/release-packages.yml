@@ -159,8 +159,37 @@ jobs:
             ${{ steps.archive.outputs.archive_path }}
             ${{ steps.archive.outputs.checksum_path }}
 
+  package-azure-marketplace:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test Azure Marketplace package
+        working-directory: deploy/azure-marketplace
+        run: python3 -m unittest -v
+
+      - name: Build Azure Marketplace package
+        run: |
+          python3 deploy/azure-marketplace/package.py --out artifacts/marketplace
+          cd artifacts/marketplace
+          sha256sum symphony-marketplace.zip > symphony-marketplace.zip.sha256
+
+      - name: Upload Azure Marketplace ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-azure-marketplace
+          path: |
+            artifacts/marketplace/symphony-marketplace.zip
+            artifacts/marketplace/symphony-marketplace.zip.sha256
+          if-no-files-found: error
+
   publish-release:
-    needs: package
+    needs: [package, package-azure-marketplace]
     runs-on: ubuntu-latest
 
     steps:
