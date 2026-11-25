@@ -96,7 +96,7 @@ class MarketplacePackageTest(unittest.TestCase):
     def test_no_secrets_in_ui_and_zip_is_reproducible(self):
         for key in ['githubSecret','codexSecret','oidcSecret','leaseSecret']:
             field = self.template['parameters'][key]
-            self.assertNotIn('defaultValue',field)
+            self.assertEqual(field.get('defaultValue'),'')
             self.assertIn('URL',field['metadata']['description'].replace('URI','URL'))
         with tempfile.TemporaryDirectory() as d:
             a,b = [Path(d)/x for x in ['a','b']]
@@ -105,6 +105,45 @@ class MarketplacePackageTest(unittest.TestCase):
             self.assertEqual((a/'symphony-marketplace.zip').read_bytes(),(b/'symphony-marketplace.zip').read_bytes())
             with zipfile.ZipFile(a/'symphony-marketplace.zip') as archive:
                 self.assertEqual(set(archive.namelist()), {'mainTemplate.json','createUiDefinition.json'})
+
+    def test_provisioning_secrets_flow_only_from_secure_inputs_to_vault(self):
+        resources = self.template['resources']
+        step = next(s for s in self.ui['parameters']['steps'] if s['name'] == 'identity')
+        fields = {c['name']:c for c in step['elements']}
+        outputs = self.ui['parameters']['outputs']
+        run = resources[-1]
+        script = run['properties']['source']['script']
+        for key, (value, secret, _) in package.SECRET_INPUTS.items():
+            self.assertEqual(self.template['parameters'][value]['type'],'secureString')
+            self.assertEqual(fields[value]['type'],'Microsoft.Common.PasswordBox')
+            self.assertIn("'provision'",fields[value]['visible'])
+            self.assertIn("'existing'",fields[key]['visible'])
+            self.assertIn("'provision'",outputs[value])
+            target = next(r for r in resources if r['type'].endswith('/vaults/secrets')
+                          and secret in r['name'])
+            self.assertEqual(target['properties']['value'], f"[parameters('{value}')]")
+            self.assertIn("'provision'",target['condition'])
+            self.assertNotIn(f"parameters('{value}')", script)
+            self.assertNotIn(value, json.dumps(self.template['outputs']))
+            self.assertIn(f'.vault.azure.net/secrets/{secret}',script)
+            self.assertIn(f"parameters('{key}')",script)
+            self.assertTrue(any(secret in dep for dep in run['dependsOn']))
+
+    def test_new_identity_and_vault_are_opt_in_and_the_grant_is_vault_scoped(self):
+        resources = self.template['resources']
+        vault = next(r for r in resources if r['type'] == package.VAULT_TYPE)
+        identity = next(r for r in resources if r['type'] == package.IDENTITY_TYPE)
+        role = next(r for r in resources if r['type'] == 'Microsoft.Authorization/roleAssignments')
+        self.assertEqual(self.template['parameters']['credentialMode']['defaultValue'],'existing')
+        self.assertTrue(vault['properties']['enableRbacAuthorization'])
+        self.assertTrue(vault['properties']['enablePurgeProtection'])
+        self.assertFalse(vault['properties']['enabledForTemplateDeployment'])
+        self.assertEqual(role['scope'], "[concat('Microsoft.KeyVault/vaults/', variables('vault'))]")
+        self.assertIn(package.VAULT_ACCESS_ROLE, role['properties']['roleDefinitionId'])
+        self.assertIn('.principalId',role['properties']['principalId'])
+        for r in [vault, identity, role]:
+            self.assertEqual(r['condition'], "[equals(parameters('credentialMode'), 'provision')]")
+        self.assertIn('extensionResourceId',json.dumps(resources[-1]['dependsOn']))
 
     def test_validated_normal_config_and_limits(self):
         cases = [{},dict(pollSeconds=30,turnSeconds=60,stallSeconds=30,maxAgents=5),

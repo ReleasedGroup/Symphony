@@ -77,10 +77,23 @@ token=$(curl --noproxy '*' --fail --silent --show-error --max-time 15 -G -H 'Met
   --data-urlencode 'api-version=2018-02-01' --data-urlencode 'resource=https://vault.azure.net' \
   --data-urlencode "client_id=$managed" "$ims" | jq -er '.access_token | select(test("^[A-Za-z0-9._-]+$"))')
 secret() {
-  curl --fail --silent --show-error --proto '=https' --max-time 20 --retry 3 \
-    --config - "$(p "$1")?api-version=7.4" <<EOF | jq -er '.value | select(type=="string" and test("^[A-Za-z0-9._~+/=:-]+$"))'
+  local code attempt url
+  url="$(p "$1")?api-version=7.4"
+  for (( attempt=1; attempt<=18; attempt++ )); do
+    if ! code=$(curl --silent --proto '=https' --max-time 10 --output "$tmp/vault-response" \
+      --write-out '%{http_code}' --config - "$url" <<EOF
 header = "Authorization: Bearer $token"
 EOF
+    ); then code=000; fi
+    case "$code" in
+      200) jq -er '.value | select(type=="string" and test("^[A-Za-z0-9._~+/=:-]+$"))' "$tmp/vault-response"
+           local status=$?; rm -f -- "$tmp/vault-response"; return "$status" ;;
+      000|403|429|500|502|503|504) (( attempt < 18 )) && sleep 10 ;;
+      *) break ;;
+    esac
+  done
+  echo "Key Vault could not provide $1 (HTTP $code). Check the secret reference and the assigned identity's vault access." >&2
+  return 1
 }
 gh=$(secret .githubSecret)
 oidc=$(secret .oidcSecret)
