@@ -22,8 +22,8 @@ public sealed class CodexAgentRunnerTests
         var started = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         var childPidPath = Path.Combine(workspace.FullName, "child.pid");
         var command = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? "powershell -NoProfile -Command \"Set-Content -Path child.pid -Value $PID; Start-Sleep -Seconds 30\""
-            : "sh -c 'echo $$ > child.pid; sleep 30'";
+            ? "powershell -NoProfile -Command \"Set-Content -Path child.pid.tmp -Value $PID; Move-Item -LiteralPath child.pid.tmp -Destination child.pid; Start-Sleep -Seconds 30\""
+            : "sh -c 'echo $$ > child.pid.tmp && mv child.pid.tmp child.pid && sleep 30'";
         using var cancellation = new CancellationTokenSource();
         try
         {

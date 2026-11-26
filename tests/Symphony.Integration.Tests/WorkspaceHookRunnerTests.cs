@@ -15,13 +15,14 @@ public sealed class WorkspaceHookRunnerTests
         var root = Directory.CreateTempSubdirectory("symphony-child-lock-").FullName;
         using var cancellation = new CancellationTokenSource();
         var runner = new WorkspaceHookRunner(NullLogger<WorkspaceHookRunner>.Instance);
-        var script = "$f = [IO.File]::Open('owned.lock', 'Create', 'ReadWrite', 'None'); [IO.File]::WriteAllText('ready', 'yes'); Start-Sleep -Seconds 30";
+        var script = "$f = [IO.File]::Open((Join-Path $PWD 'owned.lock'), 'Create', 'ReadWrite', 'None'); [IO.File]::WriteAllText((Join-Path $PWD 'ready'), 'yes'); Start-Sleep -Seconds 90";
         var encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script));
         var run = runner.RunHookAsync(new WorkspaceHookRequest("before_run",
-            $"powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}", root, 15000, "#1"), cancellation.Token);
+            $"powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}", root, 60_000, "#1"), cancellation.Token);
         try
         {
-            for (var i = 0; i < 250 && !File.Exists(Path.Combine(root, "ready")) && !run.IsCompleted; i++)
+            var startup = System.Diagnostics.Stopwatch.StartNew();
+            while (startup.Elapsed < TimeSpan.FromSeconds(30) && !File.Exists(Path.Combine(root, "ready")) && !run.IsCompleted)
                 await Task.Delay(20);
             Assert.True(File.Exists(Path.Combine(root, "ready")), "Owned child must acquire the fixture lock.");
             cancellation.Cancel();
