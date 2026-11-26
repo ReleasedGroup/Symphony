@@ -20,6 +20,11 @@ SCRIPT_TYPE = 'Microsoft.Resources/deploymentScripts'
 # Official upstream Linux/amd64 manifests, verified in their registries.
 CADDY_IMAGE = 'docker.io/library/caddy@sha256:fc9cbc100585871d18d4e451cca7021785c90a7006087427ae5ceb3e4efe6424'
 OAUTH_IMAGE = 'quay.io/oauth2-proxy/oauth2-proxy@sha256:01da265f8e371e6d3043b97829e171f3e4d53f9dc3817be15fb4fc29c92fe2a6'
+# Azure Dsv5 and Dasv5 sizes support x86-64, Gen2 Trusted Launch and Premium SSD.
+# The portal intersects this compatibility list with its deployment-context catalog.
+VM_SIZES = [f'Standard_D{cores}{suffix}_v5'
+            for suffix in ('as', 's') for cores in (2, 4, 8, 16, 32, 48, 64, 96)]
+RECOMMENDED_SIZES = ['Standard_D2as_v5', 'Standard_D2s_v5', 'Standard_D4s_v5']
 SECRET_INPUTS = {
     'githubSecret': ('githubToken', 'github-token', 'GitHub fine-grained token'),
     'codexSecret': ('codexApiKey', 'codex-api-key', 'OpenAI project API key'),
@@ -166,7 +171,7 @@ def resources():
             privateIPAllocationMethod='Dynamic', publicIPAddress=dict(id=expr(ip)), subnet=dict(
                 id=expr(f"resourceId('{vnet_type}/subnets', {v('vnet')}, 'app')"))))]), (nsg, ip, net))
     yield res(vm_type, COMPUTE, v('vm'), dict(
-        hardwareProfile=dict(vmSize='Standard_D4s_v5'),
+        hardwareProfile=dict(vmSize=expr(p('vmSize'))),
         osProfile=dict(computerName=expr(v('vm')), adminUsername='symphonyops',
             linuxConfiguration=dict(disablePasswordAuthentication=True,
                 ssh=dict(publicKeys=[dict(path='/home/symphonyops/.ssh/authorized_keys', keyData=key_data)]))),
@@ -210,6 +215,8 @@ def main_template(symphony_image=None):
         params[key] = param
     if symphony_image:
         params['symphonyImage']['defaultValue'] = symphony_image
+    params['vmSize'] = dict(type='string', defaultValue=RECOMMENDED_SIZES[0], allowedValues=VM_SIZES,
+                            metadata=dict(description='Compatible Linux virtual machine size.'))
     params['sshPublicKey']['defaultValue'] = ''
     params['recoverySshKeyResourceId'] = dict(type='string', defaultValue='',
         metadata=dict(description='Azure SSH public key resource ID. Used only if no public key text is supplied.'))
@@ -252,7 +259,13 @@ def ui(symphony_image=None):
     }
     built = {step: dict(name=step,label=label,subLabel=dict(preValidation=label,postValidation=label),
                        bladeTitle=label, elements=[]) for step,(label, _) in steps.items()}
-    outputs = {'location': '[location()]'}
+    built['hosting']['elements'].append(dict(
+        name='vmSize', type='Microsoft.Compute.SizeSelector', label='Virtual machine size',
+        toolTip='Choose a supported size in this region. Check regional family quota before deploying.',
+        osPlatform='Linux', count=1, recommendedSizes=RECOMMENDED_SIZES,
+        imageReference=dict(publisher='Canonical', offer='ubuntu-24_04-lts', sku='server'),
+        constraints=dict(allowedSizes=VM_SIZES)))
+    outputs = {'location': '[location()]', 'vmSize': "[steps('hosting').vmSize]"}
     id_step = built['identity']['elements']
     id_step.append(dict(name='entraSetupHelp', type='Microsoft.Common.InfoBox', options=dict(icon='Info',
         text='Use an existing single-tenant app and operator group, or first run the tenant-admin Entra setup helper. The wizard does not grant directory permissions.',
