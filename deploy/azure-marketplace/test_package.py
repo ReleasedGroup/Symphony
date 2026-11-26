@@ -51,6 +51,27 @@ class MarketplacePackageTest(unittest.TestCase):
         self.assertIn('/api/v1',self.template['outputs']['apiBaseUrl']['value'])
         self.assertIn('/oauth2/callback',self.template['outputs']['entraRedirectUri']['value'])
 
+    def test_rendered_size_selector_drives_vm(self):
+        with tempfile.TemporaryDirectory() as output:
+            subprocess.run([sys.executable, str(package.ROOT / 'package.py'), '--out', output], check=True)
+            with zipfile.ZipFile(Path(output) / 'symphony-marketplace.zip') as archive:
+                self.assertCountEqual(archive.namelist(), ['mainTemplate.json', 'createUiDefinition.json'])
+                template = json.loads(archive.read('mainTemplate.json'))
+                wizard = json.loads(archive.read('createUiDefinition.json'))['parameters']
+        hosting = next(step for step in wizard['steps'] if step['name'] == 'hosting')
+        selector = next(item for item in hosting['elements'] if item['name'] == 'vmSize')
+        param = template['parameters']['vmSize']
+        self.assertEqual(selector['type'], 'Microsoft.Compute.SizeSelector')
+        self.assertEqual(selector['osPlatform'], 'Linux')
+        self.assertEqual(selector['recommendedSizes'][0], 'Standard_D2as_v5')
+        self.assertEqual(param['defaultValue'], selector['recommendedSizes'][0])
+        self.assertEqual(param['allowedValues'], selector['constraints']['allowedSizes'])
+        self.assertIn('Standard_D8s_v5', param['allowedValues'])
+        self.assertNotIn('Standard_D2ps_v5', param['allowedValues'])
+        self.assertEqual(wizard['outputs']['vmSize'], "[steps('hosting').vmSize]")
+        vm = next(r for r in template['resources'] if r['type'] == 'Microsoft.Compute/virtualMachines')
+        self.assertEqual(vm['properties']['hardwareProfile']['vmSize'], "[parameters('vmSize')]")
+
     def test_inbound_network_and_persistence_contract(self):
         resources = self.template['resources']
         nsg = next(r for r in resources if r['type'].endswith('/networkSecurityGroups'))
