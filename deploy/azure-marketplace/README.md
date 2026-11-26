@@ -2,6 +2,8 @@
 
 This directory generates an Azure Application **solution template** for a single repository per isolated instance. Marketplace installs the Azure infrastructure and starts Symphony without an interactive shell. The existing dashboard and API sit behind TLS and the customer's single-tenant Entra sign-in. The service starts automatically; a job still needs all configured labels and an existing Symphony managed lease.
 
+[Marketplace listing copy, logos and certification notes](listing/README.md)
+
 ## What the template creates
 
 A standard public IP with a predictable Azure DNS name, a dedicated network and security group, and one Ubuntu VM with a managed OS disk. Only ports 80 (certificate issuance and redirect) and 443 (HTTPS) are reachable externally. No SSH, orchestration port, Docker socket or authentication service port is published. The VM runs Caddy, OAuth2 Proxy and the existing Symphony container. OAuth2 Proxy gates both browser sessions and signed Entra bearer tokens. The operator group is checked for both. The wizard can create a dedicated user-assigned managed identity and vault or use existing references. In both cases the VM receives only secret URIs. It never receives Graph directory permissions.
